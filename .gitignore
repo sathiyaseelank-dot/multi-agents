@@ -1,0 +1,88 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Linting
+.ruff_cache/
+.mypy_cache/
+.pytype/
+
+# Type checking
+.pyre/
+
+# Logs
+logs/
+*.log
+
+# Runtime artifacts
+memory/
+output/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Flask API specific
+flask_api/*.db
+flask_api/instance/
+
+# Agent CLI credentials (should never be committed)
+~/.codex/
+~/.gemini/
+~/.opencode/
+~/.kilo/

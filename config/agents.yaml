@@ -1,0 +1,274 @@
+# Agent CLI Configuration
+# Phase 0 Discovery Results - TESTED & VERIFIED
+# Date: 2026-03-19
+
+agents:
+  codex:
+    name: "Codex"
+    role: "planner"
+    description: "Planning & task decomposition - breaks user requests into structured subtasks"
+    
+    # CLI Invocation
+    command: "codex"
+    subcommand: "exec"
+    args: []
+    
+    # Environment
+    env_vars: []
+    
+    # Execution
+    timeout_seconds: 60
+    retry_count: 3
+    retry_backoff_seconds: 2
+    
+    # Output
+    output_format: "json"  # Returns JSON naturally in markdown ```json``` blocks
+    output_description: |
+      Natural JSON output with fields:
+      - epic: string (original user request)
+      - subtasks: array of task objects
+      - phases: optional array (parallel vs sequential)
+      - dependencies: optional mapping
+    
+    # Parsing Strategy
+    parsing:
+      method: "json_extraction"
+      regex: "```json\\n(.*?)\\n```"
+      fallback: "treat_as_json"
+      schema_validation: true
+    
+    # Invocation Template
+    invocation_template: |
+      codex exec "{{prompt}}"
+    
+    # Notes
+    notes: |
+      ✅ Fully tested and working
+      ✅ Returns clean structured JSON
+      ⚠️  Requires git repo (add --skip-git-repo-check if needed)
+      - First run may be slow (model reasoning)
+      - Model: gpt-5.4 (configurable via -m flag)
+      - Initial latency: 5-10 seconds
+
+  opencode:
+    name: "OpenCode"
+    role: "backend"
+    description: "Backend code generation - creates server-side APIs, databases, auth systems"
+    
+    # CLI Invocation
+    command: "opencode"
+    subcommand: "run"
+    args: []
+    
+    # Environment
+    env_vars:
+      - name: "OPENCODE_MODEL"
+        value: "claude/claude-3.5-sonnet"  # Recommended: high-capacity model
+        description: "Model provider and name (avoid qwen/qwen3-32b which has rate limits)"
+    
+    # Execution
+    timeout_seconds: 120
+    retry_count: 2
+    retry_backoff_seconds: 5
+    
+    # Output
+    output_format: "markdown_with_code_blocks"
+    output_description: |
+      Markdown with embedded code blocks:
+      ```<language>
+      ... generated code ...
+      ```
+      May include explanatory text before/after code.
+    
+    # Parsing Strategy
+    parsing:
+      method: "code_block_extraction"
+      regex: "```(\\w+)\\n(.*?)\\n```"
+      fallback: "regex_or_manual"
+      strip_ansi: true
+      extract_language: true
+    
+    # Invocation Template
+    invocation_template: |
+      opencode run "{{prompt}}"
+    
+    # Notes
+    notes: |
+      ⚠️  Tested but hit rate limit on default model (qwen/qwen3-32b)
+      - Quota/API key required
+      - Default model has TPM limit, recommend switching model
+      - Latency: 15-30 seconds
+      - Output may include ANSI codes (progress bars, colors)
+      - Supports session continuation (--continue, --session flags)
+
+  gemini:
+    name: "Gemini"
+    role: "frontend"
+    description: "Frontend code generation - creates UI components, styling, React/Vue code"
+    
+    # CLI Invocation
+    command: "gemini"
+    subcommand: null  # Uses flags directly
+    args:
+      - "--output-format"
+      - "json"  # Request JSON output for easy parsing
+    
+    # Environment
+    env_vars:
+      - name: "GEMINI_MODEL"
+        value: "gemini-2.0-flash"
+        description: "Model selection (optional)"
+    
+    # Execution
+    timeout_seconds: 90
+    retry_count: 2
+    retry_backoff_seconds: 5
+    
+    # Output
+    output_format: "json"  # Use --output-format json flag to get structured output
+    output_description: |
+      JSON-formatted response with:
+      - code: generated component code
+      - language: programming language (jsx, html, etc.)
+      - explanation: description of generated code
+    
+    # Parsing Strategy
+    parsing:
+      method: "json_parsing"
+      uses_flag: "--output-format json"
+      fallback: "code_block_extraction"
+      strip_ansi: true
+    
+    # Invocation Template
+    invocation_template: |
+      gemini -p "{{prompt}}" --output-format json
+    
+    # Notes
+    notes: |
+      ⚠️  Tested but hit quota exhaustion
+      ✅ Supports --output-format json for structured output
+      - Auth: Uses Google OAuth (cached credentials)
+      - Latency: 10-20 seconds
+      - Supports streaming: --output-format stream-json
+      - Can resume sessions: --resume latest
+      - Directory context matching: best in project root
+
+  kilo:
+    name: "Kilo"
+    role: "testing"
+    description: "Test generation & validation - writes unit tests, integration tests, test scripts"
+    
+    # CLI Invocation
+    command: "kilo"
+    subcommand: "run"
+    args: []
+    
+    # Environment
+    env_vars:
+      - name: "KILO_MODEL"
+        value: "claude/claude-3.5-sonnet"
+        description: "Model provider and name"
+    
+    # Execution
+    timeout_seconds: 120
+    retry_count: 2
+    retry_backoff_seconds: 5
+    
+    # Output
+    output_format: "markdown_with_code_blocks"
+    output_description: |
+      Markdown with test code blocks:
+      ```<language>
+      ... test code ...
+      ```
+      May include test runner output or coverage info.
+    
+    # Parsing Strategy
+    parsing:
+      method: "code_block_extraction"
+      regex: "```(\\w+)\\n(.*?)\\n```"
+      fallback: "regex_or_manual"
+      strip_ansi: true
+      extract_language: true
+    
+    # Invocation Template
+    invocation_template: |
+      kilo run "{{prompt}}"
+    
+    # Notes
+    notes: |
+      ℹ️  Not directly tested (similar to OpenCode)
+      ⚠️  Expected to have similar quota constraints
+      - Latency: 10-25 seconds
+      - Can write unit tests (pytest, jest, etc.)
+      - Supports database tools: --db flag
+      - May share quota with OpenCode provider
+
+# Global Configuration
+global:
+  # Output directory for generated artifacts
+  output_directory: "output"
+  
+  # Structured logging
+  log_level: "INFO"
+  log_directory: "logs"
+  
+  # Timeouts and retries (can be overridden per-agent)
+  default_timeout: 120
+  default_retry_count: 3
+  
+  # Session management
+  memory_directory: "memory"
+  checkpoint_frequency: "each_state_transition"
+  
+  # Parsing pipeline
+  parsing:
+    strip_ansi_codes: true
+    max_output_size_mb: 50
+    encoding: "utf-8"
+
+# Execution Modes
+execution_modes:
+  default:
+    description: "Standard orchestrator mode"
+    parallel_capable: true
+    requires_dependencies: true
+  
+  dry_run:
+    description: "Show execution plan without running agents"
+    parallel_capable: false
+    requires_dependencies: false
+  
+  mock_mode:
+    description: "Use mock agents for testing (Phase 4)"
+    parallel_capable: true
+    requires_dependencies: false
+
+# Capability Map (what each agent can do)
+capabilities:
+  codex:
+    - task_decomposition
+    - planning
+    - architecture_design
+    - code_review
+  
+  opencode:
+    - backend_api_generation
+    - database_schema
+    - authentication_systems
+    - server_side_logic
+    - documentation
+  
+  gemini:
+    - frontend_component_generation
+    - ui_styling
+    - responsive_design
+    - accessibility
+    - documentation
+  
+  kilo:
+    - unit_test_generation
+    - integration_test_generation
+    - test_coverage_analysis
+    - test_documentation
+
