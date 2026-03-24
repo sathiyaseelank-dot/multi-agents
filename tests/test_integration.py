@@ -71,7 +71,7 @@ def make_mock_orchestrator(tmp_path, planner_script="mock_codex.py",
 
 class TestFullPipeline:
     def test_plan_to_completion(self, tmp_path):
-        """Full pipeline: plan → parallel execute → aggregate → write files."""
+        """Full pipeline: plan → parallel execute → aggregate → build project."""
         orch = make_mock_orchestrator(tmp_path)
         result = asyncio.run(orch.run("Build a mock application"))
 
@@ -83,9 +83,22 @@ class TestFullPipeline:
         assert summary["counts"].get("success", 0) == 3
         assert summary["counts"].get("failed", 0) == 0
 
-        # Output files should be written
-        output_files = list((tmp_path / "output").glob("*.py"))
-        assert len(output_files) >= 2  # opencode + kilo both emit Python
+        # Project structure should be created
+        project_dir = tmp_path / "project"
+        assert project_dir.exists()
+        assert (project_dir / "backend").exists()
+        assert (project_dir / "frontend").exists()
+        assert (project_dir / "tests").exists()
+        
+        # Check for generated files in project directories
+        backend_files = list((project_dir / "backend").glob("*.py"))
+        tests_files = list((project_dir / "tests").glob("*.py"))
+        assert len(backend_files) >= 1  # opencode emits Python
+        assert len(tests_files) >= 1  # kilo emits Python tests
+        
+        # Check for entrypoint and requirements
+        assert (project_dir / "backend" / "app.py").exists()
+        assert (project_dir / "backend" / "requirements.txt").exists()
 
     def test_plan_saved_to_memory(self, tmp_path):
         orch = make_mock_orchestrator(tmp_path)

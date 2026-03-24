@@ -506,11 +506,15 @@ class TestBuildProject:
         project_dir = Path(self.temp_dir) / "organized_project"
         result = build_project(task_results, str(project_dir))
 
-        for filepath in result["files_created"]:
-            path = Path(filepath)
-            if "test" in path.name:
-                assert "/tests/" in filepath
-            elif path.suffix == ".py":
-                assert "/backend/" in filepath
-            elif path.suffix == ".js":
-                assert "/frontend/" in filepath
+        # Check files are in correct directories based on task type
+        backend_files = [f for f in result["files_created"] if "/backend/" in f]
+        frontend_files = [f for f in result["files_created"] if "/frontend/" in f]
+        tests_files = [f for f in result["files_created"] if "/tests/" in f]
+
+        assert len(backend_files) >= 1
+        assert len(frontend_files) >= 1
+        assert len(tests_files) >= 1
+
+        # Verify test files have test_ prefix
+        for f in tests_files:
+            assert "test" in Path(f).name
