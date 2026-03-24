@@ -7,11 +7,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .events import EventEmitter, EventType
 from .state_machine import State, StateMachine
 from .task_manager import TaskManager, TaskStatus
 from .task_router import compute_phases, get_fallback_agent, compute_execution_summary
 from .context_accumulator import ContextAccumulator
-from .output_writer import write_task_output
 from .project_builder import build_project
 from .config_loader import load_agent_configs
 from agents.planner import PlannerAgent
@@ -39,6 +39,8 @@ class Orchestrator:
         output_dir: str = "output",
         plan_only: bool = False,
         resume_session_id: Optional[str] = None,
+        summary_only: bool = False,
+        events: Optional[EventEmitter] = None,
     ):
         self.state_machine = StateMachine(on_transition=self._on_state_change)
         self.task_manager = TaskManager(memory_dir=memory_dir)
@@ -52,6 +54,11 @@ class Orchestrator:
         self.plan: Optional[dict] = None
         self._agents: dict = {}
         self._output_files: dict[str, list[str]] = {}
+        self.summary_only = summary_only
+        self.events = events or EventEmitter(
+            session_id=self.session_id,
+            summary_only=summary_only,
+        )
         self._agent_configs = load_agent_configs()
         self.planner = self._build_planner()
         self._ensure_dirs()
@@ -116,20 +123,32 @@ class Orchestrator:
         """Resume a previously interrupted session from checkpoint."""
         sid = self.resume_session_id
         logger.info(f"Resuming session {sid}")
-        self._print_banner()
-        print(f"\n  Resuming session: {sid}\n")
 
         # Load plan
         plan_file = Path(self.memory_dir) / f"plan-{sid}.json"
         if not plan_file.exists():
-            return {"status": "failed", "error": f"Plan file not found for session {sid}"}
+            message = f"Plan file not found for session {sid}"
+            self.events.emit(EventType.ERROR, {"message": message})
+            self.state_machine.fail(message)
+            self.events.emit(
+                EventType.RUN_COMPLETED,
+                self._build_run_completed_payload("failed", error=message),
+            )
+            return {"status": "failed", "error": message}
         saved = json.loads(plan_file.read_text())
         self.plan = saved["plan"]
 
         # Load checkpoint (task states)
         ok = self.task_manager.load_checkpoint(sid)
         if not ok:
-            return {"status": "failed", "error": f"Checkpoint not found for session {sid}"}
+            message = f"Checkpoint not found for session {sid}"
+            self.events.emit(EventType.ERROR, {"message": message})
+            self.state_machine.fail(message)
+            self.events.emit(
+                EventType.RUN_COMPLETED,
+                self._build_run_completed_payload("failed", error=message),
+            )
+            return {"status": "failed", "error": message}
 
         self.context.epic = self.plan.get("epic", "")
 
@@ -146,13 +165,18 @@ class Orchestrator:
         # Report what we're resuming from
         pending = self.task_manager.get_tasks_by_status(TaskStatus.PENDING)
         completed = self.task_manager.get_tasks_by_status(TaskStatus.SUCCESS)
-        print(f"  Checkpoint: {len(completed)} completed, {len(pending)} pending\n")
+        self.events.emit(
+            EventType.RUN_RESUMED,
+            {
+                "session_id": sid,
+                "completed": len(completed),
+                "pending": len(pending),
+                "tasks": self._resume_tasks_payload(),
+            },
+        )
 
         tasks = list(self.task_manager.tasks.values())
         phases = compute_phases(tasks)
-
-        # Display current state
-        self._display_resume_state()
 
         try:
             # Must pass through PLANNING to reach EXECUTING
@@ -162,35 +186,52 @@ class Orchestrator:
             self.state_machine.transition(State.AGGREGATING)
             summary = self._aggregate()
             self.state_machine.transition(State.COMPLETED)
+            self.events.emit(
+                EventType.RUN_COMPLETED,
+                self._build_run_completed_payload("completed", summary),
+            )
             return self._build_result("completed", plan=self.plan, summary=summary)
         except Exception as e:
             logger.error(f"Resume failed: {e}")
             self.state_machine.fail(str(e))
+            self.events.emit(EventType.ERROR, {"message": str(e)})
+            self.events.emit(
+                EventType.RUN_COMPLETED,
+                self._build_run_completed_payload("failed", error=str(e)),
+            )
             return self._build_result("failed", error=str(e))
 
-    def _display_resume_state(self):
-        """Show which tasks are done and which will run."""
-        print("  Task status:")
-        print("  " + "-" * 40)
+    def _resume_tasks_payload(self) -> list[dict]:
+        """Build task status payload for resume rendering."""
+        payload = []
         for task in self.task_manager.tasks.values():
-            icon = {"success": "OK", "failed": "FAIL", "skipped": "SKIP",
-                    "pending": "...", "running": "->>"}.get(task.status.value, "?")
-            print(f"    [{icon}] {task.id}: {task.title}")
-        print()
+            icon = {
+                "success": "OK",
+                "failed": "FAIL",
+                "skipped": "SKIP",
+                "pending": "...",
+                "running": "->>",
+            }.get(task.status.value, "?")
+            payload.append({"icon": icon, "task_id": task.id, "title": task.title})
+        return payload
 
     async def run(self, task_description: str) -> dict:
         """Run the full orchestration workflow for a given task."""
         logger.info(f"Session {self.session_id} started")
         logger.info(f"Task: {task_description}")
 
-        self._print_banner()
-        print(f"\n  Task: \"{task_description}\"\n")
+        self.events.emit(EventType.RUN_STARTED, {"task": task_description})
 
         # Health check
         unavailable = self._check_agents()
         if unavailable:
-            print(f"  [WARNING] Unavailable agents: {', '.join(unavailable)}")
-            print(f"  (tasks for these agents will use fallback routing)\n")
+            self.events.emit(
+                EventType.WARNING,
+                {
+                    "message": f"Unavailable agents: {', '.join(unavailable)}",
+                    "detail": "(tasks for these agents will use fallback routing)",
+                },
+            )
 
         try:
             # Phase: Planning
@@ -199,9 +240,12 @@ class Orchestrator:
 
             if self.plan is None:
                 self.state_machine.fail("Planner returned no valid plan")
+                self.events.emit(
+                    EventType.RUN_COMPLETED,
+                    self._build_run_completed_payload("failed", error="Planning failed"),
+                )
                 return self._build_result("failed", error="Planning failed")
 
-            self._display_plan(self.plan)
             self._save_plan(self.plan)
 
             # Load tasks into manager
@@ -211,12 +255,27 @@ class Orchestrator:
             # Compute and display execution phases from DAG
             tasks = list(self.task_manager.tasks.values())
             phases = compute_phases(tasks)
-            print(f"\n  Computed execution order ({len(phases)} phases):")
-            print(compute_execution_summary(phases))
+            self.events.emit(
+                EventType.PLAN_CREATED,
+                {
+                    "plan": self.plan,
+                    "epic": self.plan.get("epic", task_description),
+                    "task_count": len(self.plan.get("tasks", [])),
+                    "phase_count": len(phases),
+                    "execution_summary": compute_execution_summary(phases),
+                },
+            )
 
             if self.plan_only:
                 self.state_machine.transition(State.COMPLETED)
                 logger.info("Plan-only mode — skipping execution")
+                self.events.emit(
+                    EventType.RUN_COMPLETED,
+                    self._build_run_completed_payload(
+                        "completed",
+                        {"total": 0, "counts": {}},
+                    ),
+                )
                 return self._build_result("completed", plan=self.plan)
 
             # Phase: Executing
@@ -228,20 +287,29 @@ class Orchestrator:
             summary = self._aggregate()
 
             self.state_machine.transition(State.COMPLETED)
+            self.events.emit(
+                EventType.RUN_COMPLETED,
+                self._build_run_completed_payload("completed", summary),
+            )
             return self._build_result("completed", plan=self.plan, summary=summary)
 
         except Exception as e:
             logger.error(f"Orchestration failed: {e}")
             self.state_machine.fail(str(e))
+            self.events.emit(EventType.ERROR, {"message": str(e)})
+            self.events.emit(
+                EventType.RUN_COMPLETED,
+                self._build_run_completed_payload("failed", error=str(e)),
+            )
             return self._build_result("failed", error=str(e))
 
     async def _plan(self, task_description: str) -> Optional[dict]:
         """Send task to Codex planner and get structured subtask breakdown."""
-        print("  [Planner] Sending task to Codex...")
+        self.events.emit(EventType.INFO, {"message": "[Planner] Sending task to Codex..."})
 
         if not self.planner.is_available():
             logger.error("Codex CLI not found in PATH")
-            print("  [ERROR] codex command not found. Is it installed?")
+            self.events.emit(EventType.ERROR, {"message": "codex command not found. Is it installed?"})
             return None
 
         prompt = self.planner.build_prompt(task_description)
@@ -249,22 +317,31 @@ class Orchestrator:
 
         if result.status != "success":
             logger.error(f"Planner failed: {result.error}")
-            print(f"  [ERROR] Planner failed: {result.error}")
+            self.events.emit(EventType.ERROR, {"message": f"Planner failed: {result.error}"})
             return None
 
         plan = result.parsed_output
         if plan is None:
             logger.error("Could not parse planner output")
             logger.debug(f"Raw output:\n{result.raw_output[:1000]}")
-            print("  [ERROR] Could not parse structured plan from Codex output")
+            self.events.emit(
+                EventType.ERROR,
+                {"message": "Could not parse structured plan from Codex output"},
+            )
             return None
 
         issues = self.planner.validate_plan(plan)
         if issues:
             logger.warning(f"Plan validation issues: {issues}")
-            print(f"  [WARNING] Plan has issues: {', '.join(issues)}")
+            self.events.emit(
+                EventType.WARNING,
+                {"message": f"Plan has issues: {', '.join(issues)}"},
+            )
 
-        print(f"  [Planner] Received {len(plan.get('tasks', []))} subtasks")
+        self.events.emit(
+            EventType.INFO,
+            {"message": f"[Planner] Received {len(plan.get('tasks', []))} subtasks"},
+        )
         return plan
 
     async def _execute_phases(self, phases: list[list]):
@@ -277,9 +354,17 @@ class Orchestrator:
 
             parallel = len(pending) > 1
             mode = "PARALLEL" if parallel else "SEQUENTIAL"
-            task_ids = ", ".join(t.id for t in pending)
-            print(f"\n  [Phase {phase_num}/{len(phases)}] [{mode}] {len(pending)} task(s): {task_ids}")
-            print("  " + "-" * 56)
+            task_ids = [t.id for t in pending]
+            self.events.emit(
+                EventType.PHASE_STARTED,
+                {
+                    "phase": phase_num,
+                    "total_phases": len(phases),
+                    "mode": mode.lower(),
+                    "task_ids": task_ids,
+                    "task_count": len(pending),
+                },
+            )
 
             if parallel:
                 results = await asyncio.gather(
@@ -289,7 +374,16 @@ class Orchestrator:
                 for task, result in zip(pending, results):
                     if isinstance(result, Exception):
                         self.task_manager.fail_task(task.id, str(result))
-                        print(f"    [{task.id}] EXCEPTION: {result}")
+                        self.events.emit(
+                            EventType.TASK_FAILED,
+                            {
+                                "task_id": task.id,
+                                "title": task.title,
+                                "agent": task.agent,
+                                "execution_time": task.execution_time,
+                                "error": str(result),
+                            },
+                        )
             else:
                 for task in pending:
                     await self._execute_task_with_fallback(task)
@@ -310,6 +404,14 @@ class Orchestrator:
                                     task.id,
                                     f"Dependency failed: {deps & failed_ids}",
                                 )
+            self.events.emit(
+                EventType.PHASE_COMPLETED,
+                {
+                    "phase": phase_num,
+                    "total_phases": len(phases),
+                    "counts": self._phase_counts(phase_tasks),
+                },
+            )
 
     async def _execute_task_with_fallback(self, task):
         """Execute a task, falling back to an alternate agent on failure."""
@@ -320,8 +422,16 @@ class Orchestrator:
         # Try fallback agent
         fallback = get_fallback_agent(task.agent, task.type)
         if fallback:
-            print(f"    [{task.id}] Trying fallback agent: {fallback}")
             logger.info(f"Falling back from {task.agent} to {fallback} for {task.id}")
+            self.events.emit(
+                EventType.AGENT_RETRY,
+                {
+                    "task_id": task.id,
+                    "original_agent": task.agent,
+                    "fallback_agent": fallback,
+                    "reason": task.error or "Primary agent failed",
+                },
+            )
 
             # Reset task status to pending for retry
             task.status = TaskStatus.PENDING
@@ -336,19 +446,45 @@ class Orchestrator:
     async def _execute_task(self, task) -> bool:
         """Execute a single task with its assigned agent. Returns True on success."""
         self.task_manager.start_task(task.id)
-        print(f"    [{task.id}] Starting: {task.title} (agent: {task.agent})")
+        self.events.emit(
+            EventType.TASK_STARTED,
+            {
+                "task_id": task.id,
+                "title": task.title,
+                "agent": task.agent,
+                "task_type": task.type,
+            },
+        )
 
         try:
             agent = self._get_agent(task.agent)
         except ValueError as e:
             self.task_manager.fail_task(task.id, str(e))
-            print(f"    [{task.id}] FAILED: {e}")
+            self.events.emit(
+                EventType.TASK_FAILED,
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "agent": task.agent,
+                    "execution_time": task.execution_time,
+                    "error": str(e),
+                },
+            )
             return False
 
         if not agent.is_available():
             error = f"{task.agent} CLI not found in PATH"
             self.task_manager.fail_task(task.id, error)
-            print(f"    [{task.id}] FAILED: {error}")
+            self.events.emit(
+                EventType.TASK_FAILED,
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "agent": task.agent,
+                    "execution_time": task.execution_time,
+                    "error": error,
+                },
+            )
             return False
 
         # Build context from dependencies
@@ -372,7 +508,16 @@ class Orchestrator:
             summary = ""
             if result.parsed_output:
                 summary = result.parsed_output.get("summary", "done")
-            print(f"    [{task.id}] SUCCESS ({result.execution_time:.1f}s): {summary}")
+            self.events.emit(
+                EventType.TASK_COMPLETED,
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "agent": task.agent,
+                    "execution_time": result.execution_time,
+                    "summary": summary,
+                },
+            )
             return True
         else:
             self.task_manager.fail_task(
@@ -380,7 +525,16 @@ class Orchestrator:
                 error=result.error or "Unknown error",
                 execution_time=result.execution_time,
             )
-            print(f"    [{task.id}] FAILED ({result.execution_time:.1f}s): {result.error}")
+            self.events.emit(
+                EventType.TASK_FAILED,
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "agent": task.agent,
+                    "execution_time": result.execution_time,
+                    "error": result.error or "Unknown error",
+                },
+            )
             return False
 
     def _aggregate(self) -> dict:
@@ -388,38 +542,33 @@ class Orchestrator:
         summary = self.task_manager.summary()
         results = self.context.get_all_results()
 
-        print(f"\n" + "=" * 60)
-        print("  RESULTS")
-        print("=" * 60)
-
         total_blocks = 0
         total_lines = 0
+        task_summaries = []
         for task_id, task in self.task_manager.tasks.items():
             status_icon = {
                 TaskStatus.SUCCESS: "OK",
                 TaskStatus.FAILED: "FAIL",
                 TaskStatus.SKIPPED: "SKIP",
             }.get(task.status, "?")
-
-            print(f"    [{status_icon}] {task.id}: {task.title} ({task.execution_time:.1f}s)")
-
+            code_block_summaries = []
             if task.result and task.result.get("code_blocks"):
                 blocks = task.result["code_blocks"]
-                total_blocks += len(blocks)
                 for block in blocks:
                     lang = block.get("language", "?")
                     lines = len(block.get("code", "").splitlines())
+                    total_blocks += 1
                     total_lines += lines
-                    print(f"           {lang}: {lines} lines")
-
-        counts = summary["counts"]
-        print(f"\n  Total: {summary['total']} tasks | "
-              f"Success: {counts.get('success', 0)} | "
-              f"Failed: {counts.get('failed', 0)} | "
-              f"Skipped: {counts.get('skipped', 0)}")
-        if total_blocks:
-            print(f"  Code: {total_blocks} blocks, {total_lines} lines")
-        print("=" * 60)
+                    code_block_summaries.append({"language": lang, "lines": lines})
+            task_summaries.append(
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "execution_time": task.execution_time,
+                    "status_icon": status_icon,
+                    "code_blocks": code_block_summaries,
+                }
+            )
 
         # Build structured project from task results
         # Convert task results to format expected by project_builder
@@ -436,30 +585,18 @@ class Orchestrator:
         project_dir = Path(self.output_dir).parent / "project"
         build_result = build_project(task_results_for_builder, str(project_dir))
 
+        # Emit PROJECT_BUILT event
+        self.events.emit(EventType.PROJECT_BUILT, {
+            "project_path": str(project_dir),
+            "file_count": len(build_result.get("files_created", [])),
+            "entrypoint": build_result.get("entrypoint"),
+            "requirements": build_result.get("requirements"),
+        })
+
         self._output_files = {
             "project_files": build_result.get("files_created", [])
         }
         self._project_build_result = build_result
-
-        if build_result.get("files_created"):
-            print(f"\n  Project built: {len(build_result['files_created'])} files created")
-            print(f"  Location: {project_dir}/")
-            if build_result.get("entrypoint"):
-                print(f"  Entrypoint: {build_result['entrypoint']}")
-            if build_result.get("requirements"):
-                print(f"  Requirements: {build_result['requirements']}")
-
-            # Print file structure
-            print("\n  Project structure:")
-            for dir_name, dir_path in build_result.get("structure", {}).items():
-                print(f"    {dir_name}/")
-                # List files in each directory
-                dir_files = [
-                    f for f in build_result.get("files_created", [])
-                    if f.startswith(dir_path)
-                ]
-                for f in dir_files:
-                    print(f"      - {Path(f).name}")
 
         # Save full results
         results_file = Path(self.memory_dir) / f"results-{self.session_id}.json"
@@ -473,48 +610,12 @@ class Orchestrator:
         }
         results_file.write_text(json.dumps(save_data, indent=2, default=str))
         logger.info(f"Results saved to {results_file}")
-        print(f"\n  Results saved to: {results_file}")
+        self._latest_results_file = str(results_file)
+        self._latest_project_dir = str(project_dir)
+        self._latest_task_summaries = task_summaries
+        self._latest_totals = {"blocks": total_blocks, "lines": total_lines}
 
         return summary
-
-    def _display_plan(self, plan: dict):
-        """Pretty-print the plan to console."""
-        tasks = plan.get("tasks", [])
-        phases = plan.get("phases", [])
-
-        print("\n" + "=" * 60)
-        print("  EXECUTION PLAN")
-        print("=" * 60)
-
-        if plan.get("epic"):
-            print(f"\n  Epic: {plan['epic']}")
-
-        print(f"\n  Tasks ({len(tasks)}):")
-        print("  " + "-" * 56)
-
-        for task in tasks:
-            tid = task.get("id", "?")
-            title = task.get("title", "Untitled")
-            agent = task.get("agent", "?")
-            task_type = task.get("type", "?")
-            deps = task.get("dependencies", [])
-            dep_str = f" (depends on: {', '.join(deps)})" if deps else ""
-
-            print(f"    [{tid}] {title}")
-            print(f"           Agent: {agent} | Type: {task_type}{dep_str}")
-
-        if phases:
-            print(f"\n  Phases ({len(phases)}):")
-            print("  " + "-" * 56)
-            for phase in phases:
-                pnum = phase.get("phase", "?")
-                desc = phase.get("description", "")
-                parallel = "parallel" if phase.get("parallel") else "sequential"
-                task_ids = phase.get("task_ids", [])
-                print(f"    Phase {pnum} ({parallel}): {desc}")
-                print(f"           Tasks: {', '.join(task_ids)}")
-
-        print("\n" + "=" * 60)
 
     def _save_plan(self, plan: dict):
         plan_file = Path(self.memory_dir) / f"plan-{self.session_id}.json"
@@ -537,13 +638,34 @@ class Orchestrator:
             **kwargs,
         }
 
-    @staticmethod
-    def _print_banner():
-        print()
-        print("=" * 60)
-        print(f"   {VERSION_DESCRIPTION}")
-        print("   AI Development Team OS")
-        print("=" * 60)
+    def _phase_counts(self, phase_tasks: list) -> dict:
+        counts = {"success": 0, "failed": 0, "skipped": 0}
+        for task in phase_tasks:
+            if task.status == TaskStatus.SUCCESS:
+                counts["success"] += 1
+            elif task.status == TaskStatus.FAILED:
+                counts["failed"] += 1
+            elif task.status == TaskStatus.SKIPPED:
+                counts["skipped"] += 1
+        return counts
+
+    def _build_run_completed_payload(
+        self,
+        status: str,
+        summary: Optional[dict] = None,
+        error: Optional[str] = None,
+    ) -> dict:
+        return {
+            "status": status,
+            "summary": summary or {"total": 0, "counts": {}},
+            "tasks": getattr(self, "_latest_task_summaries", []),
+            "total_blocks": getattr(self, "_latest_totals", {}).get("blocks", 0),
+            "total_lines": getattr(self, "_latest_totals", {}).get("lines", 0),
+            "build_result": getattr(self, "_project_build_result", {}),
+            "project_dir": getattr(self, "_latest_project_dir", None),
+            "results_file": getattr(self, "_latest_results_file", None),
+            "error": error,
+        }
 
 
 def _safe_serialize(obj):

@@ -14,6 +14,7 @@ from agents.planner import PlannerAgent
 from agents.backend import BackendAgent
 from agents.frontend import FrontendAgent
 from agents.tester import TesterAgent
+from orchestrator.events import EventType
 from orchestrator.orchestrator import Orchestrator, AGENT_REGISTRY
 from orchestrator.task_manager import TaskStatus
 
@@ -123,6 +124,20 @@ class TestFullPipeline:
         checkpoint = json.loads(checkpoint_file.read_text())
         assert len(checkpoint["tasks"]) == 3
 
+    def test_emits_standard_events_on_success(self, tmp_path):
+        orch = make_mock_orchestrator(tmp_path)
+
+        result = asyncio.run(orch.run("Build something"))
+
+        assert result["status"] == "completed"
+        event_types = [event["type"] for event in orch.events.get_history()]
+
+        assert EventType.PLAN_CREATED.value in event_types
+        assert EventType.PHASE_STARTED.value in event_types
+        assert EventType.TASK_STARTED.value in event_types
+        assert EventType.TASK_COMPLETED.value in event_types
+        assert EventType.RUN_COMPLETED.value in event_types
+
 
 class TestFallbackRouting:
     def test_fallback_on_agent_failure(self, tmp_path):
@@ -148,6 +163,10 @@ class TestFallbackRouting:
         # Either succeeded via fallback or failed — both are valid behaviours
         assert task_001 is not None
         assert task_001.status in (TaskStatus.SUCCESS, TaskStatus.FAILED)
+
+        event_types = [event["type"] for event in orch.events.get_history()]
+        assert EventType.AGENT_RETRY.value in event_types
+        assert EventType.TASK_FAILED.value in event_types
 
 
 class TestResume:
@@ -176,6 +195,10 @@ class TestResume:
         # task-003 should now be success
         task_003 = orch2.task_manager.get_task("task-003")
         assert task_003.status == TaskStatus.SUCCESS
+
+        event_types = [event["type"] for event in orch2.events.get_history()]
+        assert EventType.RUN_RESUMED.value in event_types
+        assert EventType.RUN_COMPLETED.value in event_types
 
     def test_resume_restores_running_task_to_pending(self, tmp_path):
         """Tasks stuck in RUNNING at crash time should be reset to PENDING."""
