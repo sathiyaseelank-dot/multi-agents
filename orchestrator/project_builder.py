@@ -57,6 +57,44 @@ LANG_TO_EXT = {
     "text": ".txt",
 }
 
+# Standard library modules to ignore when extracting dependencies
+PYTHON_STDLIB_MODULES = {
+    'os', 'sys', 'json', 're', 'pathlib', 'datetime', 'typing', 'collections',
+    'functools', 'itertools', 'math', 'random', 'string', 'time', 'uuid',
+    'logging', 'asyncio', 'threading', 'multiprocessing', 'subprocess',
+    'io', 'tempfile', 'shutil', 'glob', 'fnmatch', 'pickle', 'copy',
+    'pprint', 'dataclasses', 'enum', 'abc', 'contextlib', 'hashlib',
+    'base64', 'html', 'xml', 'urllib', 'http', 'socket', 'ssl',
+    'unittest', 'pytest', 'warnings', 'traceback', 'inspect', 'dis',
+    'argparse', 'getopt', 'configparser', 'csv', 'sqlite3', 'decimal',
+    'fractions', 'statistics', 'array', 'bisect', 'heapq', 'queue',
+    'weakref', 'types', 'operator', 'operator', 'textwrap', 'struct',
+    'codecs', 'unicodedata', 'locale', 'gettext', 'builtins', 'importlib',
+    'pkgutil', 'modulefinder', 'runpy', 'zipfile', 'tarfile', 'gzip',
+    'bz2', 'lzma', 'zlib', 'platform', 'errno', 'ctypes', 'signal',
+}
+
+# Common JavaScript/Node.js built-in modules to ignore
+JS_BUILTIN_MODULES = {
+    'fs', 'path', 'http', 'https', 'url', 'querystring', 'stream',
+    'util', 'os', 'events', 'buffer', 'crypto', 'child_process',
+    'net', 'dns', 'tls', 'readline', 'repl', 'vm', 'zlib',
+    'assert', 'console', 'process', 'global', 'module', 'require',
+}
+
+# Minimal known dependency mappings (PyPI package names with versions)
+KNOWN_DEPENDENCIES = {
+    "flask": "flask>=2.3.0",
+    "requests": "requests>=2.31.0",
+    "sqlalchemy": "sqlalchemy>=2.0.0",
+    "pydantic": "pydantic>=2.0.0",
+    "fastapi": "fastapi>=0.100.0",
+    "uvicorn": "uvicorn>=0.23.0",
+    "python_dotenv": "python-dotenv>=1.0.0",
+    "jwt": "pyjwt>=2.8.0",
+    "bcrypt": "bcrypt>=4.0.0",
+}
+
 # Keywords to infer meaningful filenames from code content
 # Patterns are used with re.search(), so special chars need escaping
 KEYWORD_TO_FILENAME = {
@@ -109,6 +147,104 @@ def _slugify(text: str) -> str:
     """Convert text to a safe filename slug."""
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower())
     return slug.strip("-")[:40]
+
+
+def extract_python_dependencies(code: str) -> list[str]:
+    """Scan Python code for third-party import statements.
+
+    Args:
+        code: Python source code to analyze.
+
+    Returns:
+        Sorted list of unique third-party package names.
+    """
+    deps = set()
+
+    # Match: import flask, import flask as f, from flask import X
+    for match in re.finditer(r'^import\s+([a-zA-Z_][a-zA-Z0-9_]*)', code, re.MULTILINE):
+        pkg = match.group(1).lower()
+        if pkg not in PYTHON_STDLIB_MODULES:
+            deps.add(pkg)
+
+    for match in re.finditer(r'^from\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+import', code, re.MULTILINE):
+        pkg = match.group(1).lower()
+        if pkg not in PYTHON_STDLIB_MODULES:
+            deps.add(pkg)
+
+    return sorted(deps)
+
+
+def extract_javascript_dependencies(code: str) -> list[str]:
+    """Scan JavaScript/TypeScript code for npm package imports.
+
+    Args:
+        code: JavaScript/TypeScript source code to analyze.
+
+    Returns:
+        Sorted list of unique npm package names.
+    """
+    deps = set()
+
+    # Match: import React from 'react', import { useState } from 'react'
+    for match in re.finditer(r'''import\s+.*?\s+from\s+['"]([^'"]+)['"]''', code):
+        pkg = match.group(1)
+        # Skip relative imports
+        if not pkg.startswith('.') and not pkg.startswith('/'):
+            # Extract root package name (handle scoped packages like @org/pkg)
+            if pkg.startswith('@'):
+                parts = pkg.split('/')
+                if len(parts) >= 2:
+                    pkg = f'{parts[0]}/{parts[1]}'
+            else:
+                pkg = pkg.split('/')[0]
+
+            if pkg.lower() not in JS_BUILTIN_MODULES:
+                deps.add(pkg)
+
+    # Match: const express = require('express')
+    for match in re.finditer(r'''require\s*\(\s*['"]([^'"]+)['"]\s*\)''', code):
+        pkg = match.group(1)
+        if not pkg.startswith('.') and not pkg.startswith('/'):
+            if pkg.startswith('@'):
+                parts = pkg.split('/')
+                if len(parts) >= 2:
+                    pkg = f'{parts[0]}/{parts[1]}'
+            else:
+                pkg = pkg.split('/')[0]
+
+            if pkg.lower() not in JS_BUILTIN_MODULES:
+                deps.add(pkg)
+
+    return sorted(deps)
+
+
+def extract_dependencies_from_files(
+    files: list[dict],
+    language: str = "python",
+) -> list[str]:
+    """Extract third-party dependencies from a list of file contents.
+
+    Args:
+        files: List of dicts with "content" and optionally "language" keys.
+        language: Default language if not specified per file ("python" or "javascript").
+
+    Returns:
+        Sorted list of unique dependency strings.
+    """
+    deps = set()
+
+    for file_info in files:
+        content = file_info.get("content", "")
+        file_lang = file_info.get("language", language)
+
+        if file_lang in ("python", "py"):
+            for pkg in extract_python_dependencies(content):
+                deps.add(KNOWN_DEPENDENCIES.get(pkg, pkg))
+        elif file_lang in ("javascript", "js", "typescript", "ts", "jsx", "tsx"):
+            for pkg in extract_javascript_dependencies(content):
+                deps.add(pkg)  # npm packages use their own names
+
+    return sorted(deps)
 
 
 def _infer_filename(code: str, task_type: str, task_title: str) -> str:
@@ -344,6 +480,7 @@ def generate_requirements(
     project_dirs: dict[str, Path],
     has_backend: bool,
     has_tests: bool,
+    backend_files: Optional[list[dict]] = None,
 ) -> Optional[str]:
     """Generate requirements.txt for the backend.
 
@@ -351,6 +488,8 @@ def generate_requirements(
         project_dirs: Dictionary mapping directory names to Paths.
         has_backend: Whether backend code exists.
         has_tests: Whether test code exists.
+        backend_files: Optional list of backend file dicts with "content" key.
+            Each dict should have: {"content": "...python code...", "language": "python"}
 
     Returns:
         Path to created requirements.txt, or None if not created.
@@ -362,21 +501,25 @@ def generate_requirements(
     if not has_backend:
         return None
 
-    requirements = []
+    requirements = set()
 
     # Always add Flask for backend
-    if has_backend:
-        requirements.append("flask>=2.3.0")
+    requirements.add("flask>=2.3.0")
 
     # Add pytest if tests exist
     if has_tests:
-        requirements.append("pytest>=7.4.0")
+        requirements.add("pytest>=7.4.0")
 
-    # Add common extensions that might be needed
-    requirements.append("python-dotenv>=1.0.0")
+    # Scan backend files for dependencies
+    if backend_files:
+        for dep in extract_dependencies_from_files(backend_files, "python"):
+            requirements.add(dep)
+
+    # Ensure python-dotenv is included
+    requirements.add("python-dotenv>=1.0.0")
 
     requirements_path = backend_dir / "requirements.txt"
-    requirements_path.write_text("\n".join(requirements) + "\n")
+    requirements_path.write_text("\n".join(sorted(requirements)) + "\n")
 
     logger.info(f"Created requirements.txt: {requirements_path}")
     return str(requirements_path)
@@ -427,12 +570,25 @@ def build_project(
     if has_backend:
         entrypoint = create_entrypoint(structure, created_files)
 
-    # Step 4: Generate requirements.txt
+    # Step 4: Generate requirements.txt (with dependency scanning)
     has_tests = any(
         info.get("type") == "testing" and info.get("code_blocks")
         for info in task_results.values()
     )
-    requirements = generate_requirements(structure, has_backend, has_tests)
+
+    # Extract backend files for dependency scanning
+    backend_files = []
+    for info in task_results.values():
+        if info.get("type") != "backend":
+            continue
+        for block in info.get("code_blocks", []):
+            if block.get("language") in ("python", "py"):
+                backend_files.append({
+                    "content": block.get("code", ""),
+                    "language": "python",
+                })
+
+    requirements = generate_requirements(structure, has_backend, has_tests, backend_files)
 
     # Build summary
     result = {
