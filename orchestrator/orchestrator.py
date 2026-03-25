@@ -1,10 +1,14 @@
-"""Main orchestration engine — coordinates planning and execution."""
+"""Main orchestration engine — coordinates planning and execution.
+
+Extended with self-learning capabilities for continuous improvement.
+"""
 
 import asyncio
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 from typing import Optional
 
 from .events import EventEmitter, EventType
@@ -19,14 +23,20 @@ from .repair_engine import (
     classify_error,
     collect_relevant_files,
 )
-from .goal_analyzer import analyze_goal
+from .goal_analyzer import analyze_goal, analyze_goal_with_learning
 from .memory_store import MemoryStore
-from .pre_validation import infer_architecture_signals, predict_plan_risks
+from .pre_validation import infer_architecture_signals, predict_plan_risks, predict_plan_risks_with_learning
 from .validation_engine import validate_project
 from .dependency_resolver import resolve_dependencies
 from .runtime_executor import execute_project
 from .config_loader import load_agent_configs
-from agents.planner import PlannerAgent
+from parsing.validator import validate_review_feedback
+from .pattern_learner import PatternLearner
+from .learning_injector import LearningInjector, build_learning_context, augment_planner_prompt
+from .strategy_scorer import StrategyScorer
+from .self_improver import SelfImprover
+from .meta_controller import MetaController, MetaControllerContext
+from agents.planner import PlanReviewerAgent, PlannerAgent
 from agents.backend import BackendAgent
 from agents.frontend import FrontendAgent
 from agents.tester import TesterAgent
@@ -35,6 +45,10 @@ from agents.base_agent import AgentConfig
 from __version__ import VERSION_DESCRIPTION
 
 logger = logging.getLogger(__name__)
+
+MAX_PLAN_REVIEW_ITERATIONS = 2
+STRONG_REJECTION_CONFIDENCE = 0.8
+REVISION_ALLOWED_CONFIDENCE = 0.6
 
 # Map agent names to their classes
 AGENT_REGISTRY = {
@@ -54,6 +68,7 @@ class Orchestrator:
         resume_session_id: Optional[str] = None,
         summary_only: bool = False,
         events: Optional[EventEmitter] = None,
+        enable_learning: bool = True,
     ):
         self.state_machine = StateMachine(on_transition=self._on_state_change)
         self.task_manager = TaskManager(memory_dir=memory_dir)
@@ -77,20 +92,41 @@ class Orchestrator:
         self._optimization_history: list[dict] = []
         self._replan_history: list[dict] = []
         self._task_candidates: dict[str, list[dict]] = {}
+        self._planning_trace: dict = {}
+        self._final_review: dict = {}
+        self._review_iterations: int = 0
         self._goal_analysis: dict = {}
         self._planning_memories: list[dict] = []
         self._prevalidation_result: dict = {}
         self._memory_record: dict = {}
         self._original_prompt: str = ""
         self._refined_prompt: str = ""
+        self.enable_learning = enable_learning
         self.summary_only = summary_only
         self.events = events or EventEmitter(
             session_id=self.session_id,
             summary_only=summary_only,
         )
         self._agent_configs = load_agent_configs()
+        
+        # Initialize learning components
         self.memory_store = MemoryStore(memory_dir=memory_dir)
+        self.pattern_learner = PatternLearner(memory_dir=memory_dir) if enable_learning else None
+        self.strategy_scorer = StrategyScorer(memory_dir=memory_dir) if enable_learning else None
+        self.learning_injector = LearningInjector(self.pattern_learner) if self.pattern_learner else None
+        self.self_improver = SelfImprover(
+            self.pattern_learner,
+            self.strategy_scorer,
+            memory_dir=memory_dir,
+        ) if enable_learning and self.pattern_learner else None
+        
+        # Initialize meta-controller for governing learning decisions
+        self.meta_controller = MetaController(memory_dir=memory_dir) if enable_learning else None
+        self.meta_context = MetaControllerContext(self.meta_controller) if self.meta_controller else None
+        self._meta_decisions: list[dict] = []
+
         self.planner = self._build_planner()
+        self.reviewer = self._build_reviewer()
         self.evaluator = self._build_evaluator()
         self.project_dir = str(Path("project") / self.session_id)
         self.context.set_workspace_root(self.project_dir)
@@ -111,6 +147,23 @@ class Orchestrator:
                 env_vars=cfg.get("env_vars", {}),
             ))
         return PlannerAgent()
+
+    def _build_reviewer(self) -> PlanReviewerAgent:
+        """Build the reviewer from loaded config."""
+        cfg = self._agent_configs.get("codex_reviewer") or self._agent_configs.get("codex")
+        if cfg:
+            return PlanReviewerAgent(config=AgentConfig(
+                name=cfg["name"],
+                role=cfg.get("role", "reviewer"),
+                command=cfg["command"],
+                subcommand=cfg.get("subcommand"),
+                args=cfg.get("args", []),
+                timeout_seconds=cfg.get("timeout_seconds", 90),
+                retry_count=cfg.get("retry_count", 2),
+                retry_backoff_seconds=cfg.get("retry_backoff_seconds", 2),
+                env_vars=cfg.get("env_vars", {}),
+            ))
+        return PlanReviewerAgent()
 
     def _build_evaluator(self) -> EvaluatorAgent:
         """Build the evaluator from loaded config."""
@@ -187,6 +240,9 @@ class Orchestrator:
             return {"status": "failed", "error": message}
         saved = json.loads(plan_file.read_text())
         self.plan = saved["plan"]
+        self._planning_trace = saved.get("planning_trace", {})
+        self._review_iterations = saved.get("review_iterations", 0)
+        self._final_review = saved.get("final_review", {})
 
         # Load checkpoint (task states)
         ok = self.task_manager.load_checkpoint(sid)
@@ -397,55 +453,324 @@ class Orchestrator:
             return self._build_result("failed", error=str(e))
 
     async def _plan(self, task_description: str) -> Optional[dict]:
-        """Send task to Codex planner and get structured subtask breakdown."""
+        """Send task to Codex planner and get structured subtask breakdown.
+        
+        Extended with learning injection for improved planning.
+        """
         self.events.emit(EventType.INFO, {"message": "[Planner] Sending task to Codex..."})
 
         if not self.planner.is_available():
             logger.error("Codex CLI not found in PATH")
             self.events.emit(EventType.ERROR, {"message": "codex command not found. Is it installed?"})
             return None
-
-        self._planning_memories = self.memory_store.find_similar_runs(task_description)
-        self._goal_analysis = analyze_goal(task_description, self._planning_memories)
-        self._refined_prompt = self._goal_analysis.get("refined_goal", task_description)
-
-        prompt = self.planner.build_prompt(
-            self._refined_prompt,
-            context={
-                "goal_analysis": self._goal_analysis,
-                "similar_runs": self._planning_memories,
-            },
-        )
-        result = await self.planner.execute(prompt)
-
-        if result.status != "success":
-            logger.error(f"Planner failed: {result.error}")
-            self.events.emit(EventType.ERROR, {"message": f"Planner failed: {result.error}"})
+        if not self.reviewer.is_available():
+            logger.error("Reviewer agent not found in PATH")
+            self.events.emit(EventType.ERROR, {"message": "reviewer command not found. Is it installed?"})
             return None
 
-        plan = result.parsed_output
-        if plan is None:
-            logger.error("Could not parse planner output")
-            logger.debug(f"Raw output:\n{result.raw_output[:1000]}")
+        # PHASE 1: Retrieve similar runs from memory
+        self._planning_memories = self.memory_store.find_similar_runs(task_description)
+
+        # PHASE 2: Get learning context if enabled
+        learning_context = {}
+        if self.enable_learning and self.learning_injector:
+            learning_context = self.learning_injector.prepare_for_planning(task_description)
+
+            # Emit learning recommendations
+            if learning_context.get("recommended_frameworks"):
+                self.events.emit(
+                    EventType.INFO,
+                    {"message": f"Learning recommends frameworks: {', '.join(learning_context['recommended_frameworks'][:3])}"}
+                )
+            if learning_context.get("failure_warnings"):
+                for warning in learning_context["failure_warnings"][:2]:
+                    self.events.emit(
+                        EventType.WARNING,
+                        {"message": f"Learning warning: {warning.get('warning', '')}"}
+                    )
+
+        # PHASE 2.5: Meta-controller strategy selection
+        meta_context = {}
+        if self.enable_learning and self.meta_controller and self.strategy_scorer:
+            # Get strategy rankings
+            strategy_rankings = {
+                "frameworks": self.strategy_scorer.get_ranking_with_confidence("frameworks"),
+                "architectures": self.strategy_scorer.get_ranking_with_confidence("architectures"),
+                "tools": self.strategy_scorer.get_ranking_with_confidence("tools"),
+            }
+            
+            # Get meta-controller decisions
+            meta_context = self.meta_context.build_planning_context(strategy_rankings)
+            self._meta_decisions = meta_context.get("meta_decisions", [])
+            
+            # Emit meta-controller guidance
+            if meta_context.get("selected_strategies"):
+                strategies_str = ", ".join(
+                    f"{k}:{v}" for k, v in meta_context["selected_strategies"].items()
+                )
+                self.events.emit(
+                    EventType.INFO,
+                    {"message": f"Meta-controller selected: {strategies_str}"}
+                )
+            if meta_context.get("exploration_mode"):
+                self.events.emit(
+                    EventType.INFO,
+                    {"message": "System in EXPLORATION mode - trying alternative strategies"}
+                )
+
+        # PHASE 3: Analyze goal with learning integration
+        if self.enable_learning and self.pattern_learner and self.strategy_scorer:
+            self._goal_analysis = analyze_goal_with_learning(
+                task_description,
+                self.pattern_learner,
+                self.strategy_scorer,
+                similar_runs=self._planning_memories,
+            )
+        else:
+            self._goal_analysis = analyze_goal(
+                task_description,
+                similar_runs=self._planning_memories,
+            )
+        
+        self._refined_prompt = self._goal_analysis.get("refined_goal", task_description)
+        planning_context = {
+            "goal_analysis": self._goal_analysis,
+            "similar_runs": self._planning_memories,
+        }
+        if self.enable_learning and learning_context:
+            planning_context["learning_context"] = learning_context
+        if self.enable_learning and meta_context:
+            planning_context["meta_context"] = meta_context
+
+        self._planning_trace = {
+            "initial_plan": None,
+            "review_1": None,
+            "revised_plan": None,
+            "review_2": None,
+        }
+        self._final_review = {}
+        self._review_iterations = 0
+
+        try:
+            async with asyncio.timeout(self._planning_time_budget_seconds()):
+                initial_result = await self._generate_plan_candidate(
+                    self._refined_prompt,
+                    planning_context,
+                )
+                if initial_result is None:
+                    return None
+
+                initial_plan = initial_result.parsed_output
+                self._planning_trace["initial_plan"] = initial_plan
+
+                review_1 = await self._review_candidate_plan(
+                    self._refined_prompt,
+                    initial_plan,
+                    planning_context,
+                    iteration=1,
+                )
+                if review_1 is None:
+                    return None
+
+                self._planning_trace["review_1"] = review_1
+                self._final_review = review_1
+                self._review_iterations = 1
+
+                if review_1["approval"]:
+                    self.events.emit(
+                        EventType.PLAN_APPROVED,
+                        {"review_iterations": self._review_iterations},
+                    )
+                    self._write_session_artifact("planning_trace", self._planning_trace)
+                    return initial_plan
+
+                if review_1["confidence"] > STRONG_REJECTION_CONFIDENCE:
+                    self.events.emit(
+                        EventType.PLAN_REJECTED,
+                        {"review_iterations": self._review_iterations},
+                    )
+                    self._write_session_artifact("planning_trace", self._planning_trace)
+                    return None
+
+                revision_result = await self._revise_plan_candidate(
+                    self._refined_prompt,
+                    initial_plan,
+                    review_1,
+                    planning_context,
+                )
+                if revision_result is None:
+                    return None
+
+                revised_plan = revision_result.parsed_output
+                self._planning_trace["revised_plan"] = revised_plan
+                self.events.emit(EventType.PLAN_REVISED, {"iteration": 1})
+
+                review_2 = await self._review_candidate_plan(
+                    self._refined_prompt,
+                    revised_plan,
+                    planning_context,
+                    iteration=2,
+                )
+                if review_2 is None:
+                    return None
+
+                self._planning_trace["review_2"] = review_2
+                self._final_review = review_2
+                self._review_iterations = 2
+                self._write_session_artifact("planning_trace", self._planning_trace)
+
+                if review_2["approval"]:
+                    self.events.emit(
+                        EventType.PLAN_APPROVED,
+                        {"review_iterations": self._review_iterations},
+                    )
+                    return revised_plan
+
+                self.events.emit(
+                    EventType.PLAN_REJECTED,
+                    {"review_iterations": self._review_iterations},
+                )
+                return None
+        except TimeoutError:
+            logger.error("Planning debate timed out")
+            self.events.emit(EventType.ERROR, {"message": "Planning debate exceeded time budget"})
+            return None
+
+    def _planning_time_budget_seconds(self) -> int:
+        """Budget planner + reviewer debate with a bounded upper limit."""
+        planner_timeout = getattr(self.planner.config, "timeout_seconds", 120)
+        reviewer_timeout = getattr(self.reviewer.config, "timeout_seconds", 90)
+        return max(planner_timeout + reviewer_timeout + planner_timeout + reviewer_timeout, 60)
+
+    async def _generate_plan_candidate(self, task_description: str, planning_context: dict):
+        base_context = {
+            "goal_analysis": planning_context.get("goal_analysis", {}),
+            "similar_runs": planning_context.get("similar_runs", []),
+        }
+        prompt = self.planner.build_prompt(task_description, context=base_context)
+        if self.enable_learning and planning_context.get("learning_context"):
+            prompt = augment_planner_prompt(prompt, planning_context["learning_context"])
+        result = await self.planner.execute(prompt)
+        if result.status != "success":
+            logger.error("Planner failed: %s", result.error)
+            self.events.emit(EventType.ERROR, {"message": f"Planner failed: {result.error}"})
+            return None
+        if not result.parsed_output:
+            logger.error("Could not parse structured plan from planner output")
             self.events.emit(
                 EventType.ERROR,
                 {"message": "Could not parse structured plan from Codex output"},
             )
             return None
-
-        issues = self.planner.validate_plan(plan)
+        issues = self.planner.validate_plan(result.parsed_output)
         if issues:
-            logger.warning(f"Plan validation issues: {issues}")
+            logger.warning("Plan validation issues: %s", issues)
             self.events.emit(
                 EventType.WARNING,
                 {"message": f"Plan has issues: {', '.join(issues)}"},
             )
-
         self.events.emit(
             EventType.INFO,
-            {"message": f"[Planner] Received {len(plan.get('tasks', []))} subtasks"},
+            {"message": f"[Planner] Received {len(result.parsed_output.get('tasks', []))} subtasks"},
         )
-        return plan
+        return result
+
+    async def _revise_plan_candidate(
+        self,
+        task_description: str,
+        prior_plan: dict,
+        review_feedback: dict,
+        planning_context: dict,
+    ):
+        revision_context = {
+            "goal_analysis": planning_context.get("goal_analysis", {}),
+            "similar_runs": planning_context.get("similar_runs", []),
+            "learning_context": planning_context.get("learning_context", {}),
+        }
+        prompt = self.planner.build_revision_prompt(
+            task_description,
+            prior_plan,
+            review_feedback,
+            context=revision_context,
+        )
+        result = await self.planner.execute(prompt)
+        if result.status != "success":
+            logger.error("Planner revision failed: %s", result.error)
+            self.events.emit(EventType.ERROR, {"message": f"Planner revision failed: {result.error}"})
+            return None
+        if not result.parsed_output:
+            self.events.emit(
+                EventType.ERROR,
+                {"message": "Could not parse structured revised plan from Codex output"},
+            )
+            return None
+        issues = self.planner.validate_plan(result.parsed_output)
+        if issues:
+            logger.warning("Revised plan validation issues: %s", issues)
+            self.events.emit(
+                EventType.WARNING,
+                {"message": f"Revised plan has issues: {', '.join(issues)}"},
+            )
+        return result
+
+    async def _review_candidate_plan(
+        self,
+        task_description: str,
+        candidate_plan: dict,
+        planning_context: dict,
+        iteration: int,
+    ) -> Optional[dict]:
+        self.events.emit(EventType.PLAN_REVIEW_STARTED, {"iteration": iteration})
+        review_context = {
+            "goal_analysis": planning_context.get("goal_analysis", {}),
+            "similar_runs": planning_context.get("similar_runs", []),
+            "learning_context": planning_context.get("learning_context", {}),
+            "critical_issue_policy": {
+                "critical_issues": [
+                    "missing core task",
+                    "broken dependencies",
+                    "invalid architecture",
+                    "execution impossible",
+                ],
+                "approve_if_no_critical_issues": True,
+            },
+        }
+        started = monotonic()
+        result = await self.reviewer.review_plan(
+            task_description,
+            candidate_plan,
+            context=review_context,
+        )
+        elapsed = monotonic() - started
+        if result.status != "success":
+            logger.error("Reviewer failed: %s", result.error)
+            self.events.emit(EventType.ERROR, {"message": f"Reviewer failed: {result.error}"})
+            return None
+        if result.parsed_output is None:
+            self.events.emit(EventType.ERROR, {"message": "Reviewer returned malformed output"})
+            return None
+
+        issues = validate_review_feedback(result.parsed_output)
+        if issues:
+            logger.error("Reviewer output invalid: %s", issues)
+            self.events.emit(
+                EventType.ERROR,
+                {"message": f"Reviewer output invalid: {', '.join(issues)}"},
+            )
+            return None
+
+        review = dict(result.parsed_output)
+        review["iteration"] = iteration
+        review["execution_time"] = round(elapsed, 3)
+        self.events.emit(
+            EventType.PLAN_REVIEW_COMPLETED,
+            {
+                "iteration": iteration,
+                "approval": review["approval"],
+                "confidence": review["confidence"],
+            },
+        )
+        return review
 
     async def _execute_phases(self, phases: list[list]):
         """Execute tasks phase by phase — parallel within each phase."""
@@ -958,6 +1283,9 @@ class Orchestrator:
             "goal_analysis": _safe_serialize(self._goal_analysis),
             "planning_memories": _safe_serialize(self._planning_memories),
             "prevalidation": _safe_serialize(self._prevalidation_result),
+            "planning_trace": _safe_serialize(self._planning_trace),
+            "review_iterations": self._review_iterations,
+            "final_review": _safe_serialize(self._final_review),
             "project_build": _safe_serialize(self._project_build_result),
             "validation": _safe_serialize(self._validation_result),
             "dependencies": _safe_serialize(self._dependency_result),
@@ -978,12 +1306,21 @@ class Orchestrator:
             "session_id": self.session_id,
             "timestamp": datetime.now().isoformat(),
             "plan": plan,
+            "planning_trace": _safe_serialize(self._planning_trace),
+            "review_iterations": self._review_iterations,
+            "final_review": _safe_serialize(self._final_review),
         }
         plan_file.write_text(json.dumps(data, indent=2))
         logger.info(f"Plan saved to {plan_file}")
 
     def _build_result(self, status: str, **kwargs) -> dict:
         confidence = self._compute_confidence()
+        
+        # Get meta-controller summary if available
+        meta_summary = {}
+        if self.enable_learning and self.meta_controller:
+            meta_summary = self.meta_controller.get_recommendations()
+        
         return {
             "session_id": self.session_id,
             "status": status,
@@ -995,10 +1332,15 @@ class Orchestrator:
             "build_result": getattr(self, "_project_build_result", {}),
             "goal_analysis": getattr(self, "_goal_analysis", {}),
             "planning_memories": getattr(self, "_planning_memories", []),
+            "planning_trace": getattr(self, "_planning_trace", {}),
+            "review_iterations": getattr(self, "_review_iterations", 0),
+            "final_review": getattr(self, "_final_review", {}),
             "prevalidation_result": getattr(self, "_prevalidation_result", {}),
             "validation_result": getattr(self, "_validation_result", {}),
             "runtime_result": getattr(self, "_runtime_result", {}),
             "evaluation_result": getattr(self, "_evaluation_result", {}),
+            "meta_decisions": getattr(self, "_meta_decisions", []),
+            "meta_summary": meta_summary,
             "confidence": confidence,
             "issues_remaining": self._collect_issues_remaining(),
             "logs": getattr(self, "_runtime_result", {}).get("logs", ""),
@@ -1106,18 +1448,132 @@ class Orchestrator:
         return max(0, min(100, base))
 
     def _store_run_memory(self) -> None:
+        """Store run data in memory for future learning.
+        
+        Extended to store full learning artifacts and update strategy scores.
+        """
         prompt = self._original_prompt or self.plan and self.plan.get("epic", "") or ""
         if not prompt:
             return
-        self._memory_record = self.memory_store.add_run(
+        
+        # Store using the new artifact-based method
+        self._memory_record = self.memory_store.add_run_from_artifacts(
             session_id=self.session_id,
             prompt=prompt,
             refined_goal=self._refined_prompt or prompt,
-            errors=self._collect_issues_remaining(),
-            fixes_applied=self._repair_history,
-            final_score=int(self._evaluation_result.get("score", 0)),
+            project_build=getattr(self, "_project_build_result", {}),
+            validation=getattr(self, "_validation_result", {}),
+            runtime=getattr(self, "_runtime_result", {}),
+            repairs=getattr(self, "_repair_history", []),
+            evaluation=getattr(self, "_evaluation_result", {}),
         )
+        
+        # PHASE: Update strategy scores from this run
+        if self.enable_learning and self.strategy_scorer:
+            self._update_strategy_scores()
+        
+        # PHASE: Record patterns in pattern learner
+        if self.enable_learning and self.pattern_learner:
+            self._record_learning_patterns()
+        
         self._persist_session_results()
+        logger.info("Stored run memory and updated learning for session %s", self.session_id)
+    
+    def _update_strategy_scores(self):
+        """Update strategy scores based on run outcome."""
+        success = (
+            self._validation_result.get("success", False) and
+            self._runtime_result.get("success", False)
+        )
+        score = self._evaluation_result.get("score", 50) if self._evaluation_result else 50
+        repair_count = len(getattr(self, "_repair_history", []))
+
+        # Extract frameworks from project build
+        build_result = getattr(self, "_project_build_result", {})
+        framework_choices = self.memory_store._extract_frameworks(build_result)
+        architecture = self.memory_store._extract_architecture(build_result)
+
+        # Update framework scores with repair tracking
+        for framework in framework_choices:
+            self.strategy_scorer.record_outcome_with_repairs(
+                strategy_key=framework,
+                category="frameworks",
+                success=success,
+                score=score,
+                repair_count=repair_count,
+            )
+
+        # Update architecture scores
+        arch_type = architecture.get("type", "")
+        if arch_type and arch_type != "unknown":
+            self.strategy_scorer.record_outcome_with_repairs(
+                strategy_key=arch_type,
+                category="architectures",
+                success=success,
+                score=score,
+                repair_count=repair_count,
+            )
+
+        # Update tool scores
+        tool_choices = self.memory_store._extract_tools(build_result)
+        for tool in tool_choices:
+            self.strategy_scorer.record_outcome_with_repairs(
+                strategy_key=tool,
+                category="tools",
+                success=success,
+                score=score,
+                repair_count=repair_count,
+            )
+
+        # Record meta-controller outcomes
+        if self.enable_learning and self.meta_controller:
+            self._record_meta_outcomes(success, score, repair_count)
+    
+    def _record_meta_outcomes(self, success: bool, score: float, repair_count: int):
+        """Record outcomes for meta-controller decisions.
+        
+        Args:
+            success: Whether the run was successful.
+            score: Evaluation score.
+            repair_count: Number of repairs needed.
+        """
+        for decision_data in self._meta_decisions:
+            # Create a StrategyDecision from the stored data
+            from .meta_controller import StrategyDecision
+            decision = StrategyDecision(
+                category=decision_data.get("category", "unknown"),
+                strategy=decision_data.get("strategy", "unknown"),
+                mode=decision_data.get("mode", "unknown"),
+                score=decision_data.get("score", 0),
+                confidence=decision_data.get("confidence", 0),
+                exploration_rate=decision_data.get("exploration_rate", 0),
+            )
+            
+            # Record outcome
+            self.meta_controller.record_outcome(
+                decision=decision,
+                success=success,
+                score=score,
+                repair_count=repair_count,
+            )
+        
+        logger.info(
+            "Recorded %d meta-controller outcomes: success=%s, score=%.1f, repairs=%d",
+            len(self._meta_decisions), success, score, repair_count
+        )
+    
+    def _record_learning_patterns(self):
+        """Record patterns from this run for future learning."""
+        run_record = {
+            "session_id": self.session_id,
+            "timestamp": datetime.now().isoformat(),
+            "project_build": getattr(self, "_project_build_result", {}),
+            "validation": getattr(self, "_validation_result", {}),
+            "runtime": getattr(self, "_runtime_result", {}),
+            "repairs": getattr(self, "_repair_history", []),
+            "evaluation": getattr(self, "_evaluation_result", {}),
+        }
+        self.pattern_learner.record_run(run_record)
 
     @staticmethod
     def _merge_plan(current_plan: dict, replanned: dict) -> dict:
@@ -1161,6 +1617,9 @@ class Orchestrator:
             "evaluation_result": getattr(self, "_evaluation_result", {}),
             "prevalidation_result": getattr(self, "_prevalidation_result", {}),
             "goal_analysis": getattr(self, "_goal_analysis", {}),
+            "planning_trace": getattr(self, "_planning_trace", {}),
+            "review_iterations": getattr(self, "_review_iterations", 0),
+            "final_review": getattr(self, "_final_review", {}),
             "project_dir": getattr(self, "_latest_project_dir", None),
             "results_file": getattr(self, "_latest_results_file", None),
             "error": error,

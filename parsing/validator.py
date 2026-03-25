@@ -71,3 +71,31 @@ def validate_worker_result(result: Any) -> list[str]:
         issues.append(f"Unexpected result type: {type(result).__name__}")
 
     return issues
+
+
+def validate_review_feedback(review: Any) -> list[str]:
+    """Validate reviewer feedback for the planning debate loop."""
+    if not isinstance(review, dict):
+        return ["Review feedback must be a dict"]
+
+    issues = []
+
+    review_issues = review.get("issues")
+    if not isinstance(review_issues, list) or not all(isinstance(item, str) for item in review_issues):
+        issues.append("Review feedback 'issues' must be a list of strings")
+
+    suggestions = review.get("suggestions")
+    if not isinstance(suggestions, list) or not all(isinstance(item, str) for item in suggestions):
+        issues.append("Review feedback 'suggestions' must be a list of strings")
+
+    approval = review.get("approval")
+    if not isinstance(approval, bool):
+        issues.append("Review feedback 'approval' must be a boolean")
+
+    confidence = review.get("confidence")
+    if not isinstance(confidence, (int, float)):
+        issues.append("Review feedback 'confidence' must be a number")
+    elif confidence < 0.0 or confidence > 1.0:
+        issues.append("Review feedback 'confidence' must be between 0.0 and 1.0")
+
+    return issues

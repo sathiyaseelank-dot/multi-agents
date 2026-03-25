@@ -20,6 +20,11 @@ class EventType(StrEnum):
     WARNING = "warning"
     ERROR = "error"
     PLAN_CREATED = "plan_created"
+    PLAN_REVIEW_STARTED = "plan_review_started"
+    PLAN_REVIEW_COMPLETED = "plan_review_completed"
+    PLAN_REVISED = "plan_revised"
+    PLAN_REJECTED = "plan_rejected"
+    PLAN_APPROVED = "plan_approved"
     PHASE_STARTED = "phase_started"
     PHASE_COMPLETED = "phase_completed"
     TASK_STARTED = "task_started"
@@ -182,6 +187,39 @@ class EventEmitter:
 
             self._write()
             self._write("=" * 60)
+            return
+
+        if event_type == EventType.PLAN_REVIEW_STARTED:
+            self._write(
+                f'  [Review {data.get("iteration", "?")}] Reviewer analyzing plan'
+            )
+            return
+
+        if event_type == EventType.PLAN_REVIEW_COMPLETED:
+            approval = "APPROVED" if data.get("approval") else "REJECTED"
+            self._write(
+                f'  [Review {data.get("iteration", "?")}] {approval} '
+                f'(confidence: {data.get("confidence", 0.0):.2f})'
+            )
+            return
+
+        if event_type == EventType.PLAN_REVISED:
+            self._write(
+                f'  [Planner] Revised plan after review {data.get("iteration", "?")}'
+            )
+            return
+
+        if event_type == EventType.PLAN_REJECTED:
+            self._write(
+                f'  [Planner] Debate ended without approval after '
+                f'{data.get("review_iterations", 0)} review(s)'
+            )
+            return
+
+        if event_type == EventType.PLAN_APPROVED:
+            self._write(
+                f'  [Planner] Plan approved after {data.get("review_iterations", 0)} review(s)'
+            )
             return
 
         if event_type == EventType.PHASE_STARTED:

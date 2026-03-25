@@ -50,6 +50,42 @@ agents:
       - Model: gpt-5.4 (configurable via -m flag)
       - Initial latency: 5-10 seconds
 
+  codex_reviewer:
+    name: "Codex Reviewer"
+    role: "reviewer"
+    description: "Plan critique agent - reviews plans for missing tasks, dependency mistakes, architecture issues, and scalability risks"
+
+    command: "codex"
+    subcommand: "exec"
+    args: []
+
+    env_vars: []
+
+    timeout_seconds: 90
+    retry_count: 2
+    retry_backoff_seconds: 2
+
+    output_format: "json"
+    output_description: |
+      Reviewer JSON with fields:
+      - issues: array of strings
+      - suggestions: array of strings
+      - approval: boolean
+      - confidence: float 0.0-1.0
+
+    parsing:
+      method: "json_extraction"
+      regex: "```json\\n(.*?)\\n```"
+      fallback: "treat_as_json"
+      schema_validation: true
+
+    invocation_template: |
+      codex exec "{{prompt}}"
+
+    notes: |
+      ✅ Same bounded CLI invocation as planner
+      ✅ Reviewer is advisory only and never returns an executable plan
+
   opencode:
     name: "OpenCode"
     role: "backend"
@@ -271,4 +307,3 @@ capabilities:
     - integration_test_generation
     - test_coverage_analysis
     - test_documentation
-

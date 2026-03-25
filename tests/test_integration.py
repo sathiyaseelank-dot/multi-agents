@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agents.base_agent import AgentConfig
-from agents.planner import PlannerAgent
+from agents.planner import PlanReviewerAgent, PlannerAgent
 from agents.backend import BackendAgent
 from agents.frontend import FrontendAgent
 from agents.tester import TesterAgent
@@ -36,6 +36,7 @@ def mock_config(script: str, **kwargs) -> AgentConfig:
 
 
 def make_mock_orchestrator(tmp_path, planner_script="mock_codex.py",
+                            reviewer_script="mock_reviewer_approve.py",
                             backend_script="mock_opencode.py",
                             frontend_script="mock_gemini.py",
                             tester_script="mock_kilo.py") -> Orchestrator:
@@ -78,6 +79,14 @@ def make_mock_orchestrator(tmp_path, planner_script="mock_codex.py",
         timeout_seconds=10, retry_count=1, retry_backoff_seconds=0,
     ))
     orch.planner = planner
+    reviewer = PlanReviewerAgent(config=AgentConfig(
+        name="codex-reviewer",
+        role="reviewer",
+        command="python3",
+        args=[str(MOCK_DIR / reviewer_script)],
+        timeout_seconds=10, retry_count=1, retry_backoff_seconds=0,
+    ))
+    orch.reviewer = reviewer
 
     # Override workers
     orch._agents["opencode"] = BackendAgent(config=mock_config(
@@ -127,6 +136,9 @@ class TestFullPipeline:
         assert (project_dir / "backend" / "app.py").exists()
         assert (project_dir / "requirements.txt").exists()
         assert result["goal_analysis"]["refined_goal"]
+        assert result["planning_trace"]["review_1"]["approval"] is True
+        assert result["review_iterations"] == 1
+        assert result["final_review"]["approval"] is True
         assert "prevalidation_result" in result
         assert result["validation_result"]["success"] is True
         assert result["runtime_result"]["success"] is True
@@ -172,6 +184,9 @@ class TestFullPipeline:
         event_types = [event["type"] for event in orch.events.get_history()]
 
         assert EventType.PLAN_CREATED.value in event_types
+        assert EventType.PLAN_REVIEW_STARTED.value in event_types
+        assert EventType.PLAN_REVIEW_COMPLETED.value in event_types
+        assert EventType.PLAN_APPROVED.value in event_types
         assert EventType.PHASE_STARTED.value in event_types
         assert EventType.TASK_STARTED.value in event_types
         assert EventType.TASK_COMPLETED.value in event_types
@@ -207,6 +222,52 @@ class TestFallbackRouting:
         event_types = [event["type"] for event in orch.events.get_history()]
         assert EventType.AGENT_RETRY.value in event_types
         assert EventType.TASK_FAILED.value in event_types
+
+
+class TestPlanningDebate:
+    def test_reviewer_requests_revision_then_approves(self, tmp_path):
+        orch = make_mock_orchestrator(
+            tmp_path,
+            planner_script="mock_planner_debate.py",
+            reviewer_script="mock_reviewer_debate.py",
+        )
+
+        result = asyncio.run(orch.run("Build a debated application"))
+
+        assert result["status"] == "completed"
+        assert result["review_iterations"] == 2
+        assert result["planning_trace"]["initial_plan"]["tasks"][-1]["id"] == "task-002"
+        assert result["planning_trace"]["review_1"]["approval"] is False
+        assert result["planning_trace"]["revised_plan"]["tasks"][-1]["id"] == "task-003"
+        assert result["planning_trace"]["review_2"]["approval"] is True
+        assert result["final_review"]["approval"] is True
+
+    def test_reviewer_rejects_twice_and_planning_fails(self, tmp_path):
+        orch = make_mock_orchestrator(
+            tmp_path,
+            planner_script="mock_planner_debate.py",
+            reviewer_script="mock_reviewer_reject.py",
+        )
+
+        result = asyncio.run(orch.run("Build a debated application"))
+
+        assert result["status"] == "failed"
+        assert result["review_iterations"] == 2
+        assert result["planning_trace"]["review_2"]["approval"] is False
+        assert result["final_review"]["approval"] is False
+
+    def test_malformed_reviewer_output_fails_planning(self, tmp_path):
+        orch = make_mock_orchestrator(
+            tmp_path,
+            planner_script="mock_planner_debate.py",
+            reviewer_script="mock_reviewer_invalid.py",
+        )
+
+        result = asyncio.run(orch.run("Build a debated application"))
+
+        assert result["status"] == "failed"
+        assert result["planning_trace"]["initial_plan"] is not None
+        assert result["review_iterations"] == 0
 
 
 class TestResume:

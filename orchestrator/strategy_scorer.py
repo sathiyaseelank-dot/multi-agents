@@ -172,12 +172,42 @@ class StrategyScorer:
         if context:
             context_key = f"{strategy_key}:{context}"
             self._update_context_score(context_key, success, score)
-        
+
         self._save_scores()
         logger.debug(
             "Recorded outcome for %s/%s: success=%s, score=%.1f",
             category, strategy_key, success, score
         )
+
+    def record_outcome_with_repairs(
+        self,
+        strategy_key: str,
+        category: str,
+        success: bool,
+        score: float = 50.0,
+        repair_count: int = 0,
+        context: Optional[str] = None,
+    ):
+        """Record outcome with repair count tracking.
+
+        Args:
+            strategy_key: Strategy identifier.
+            category: Category (frameworks, architectures, tools).
+            success: Whether the run was successful.
+            score: Evaluation score (0-100).
+            repair_count: Number of repairs needed.
+            context: Optional context for context-specific scoring.
+        """
+        self.record_outcome(strategy_key, category, success, score, context)
+
+        # Track repair count
+        if category in self.strategies and strategy_key in self.strategies[category]:
+            strategy = self.strategies[category][strategy_key]
+            existing_repairs = strategy.get("repair_count", 0)
+            # Exponential moving average of repairs
+            alpha = 0.3
+            strategy["repair_count"] = alpha * repair_count + (1 - alpha) * existing_repairs
+            self._save_scores()
     
     def _update_context_score(self, context_key: str, success: bool, score: float):
         """Update context-specific score."""
@@ -199,27 +229,98 @@ class StrategyScorer:
     
     def get_score(self, category: str, strategy_key: str) -> Optional[dict]:
         """Get computed score for a strategy.
-        
+
         Args:
             category: Category (frameworks, architectures, tools).
             strategy_key: Strategy identifier.
-            
+
         Returns:
             Score dictionary or None if not found.
         """
         if category not in self.strategies:
             return None
-        
+
         if strategy_key not in self.strategies[category]:
             return None
-        
+
         strategy = self.strategies[category][strategy_key]
-        
+
         return self.updater.update(
             successes=strategy["successes"],
             failures=strategy["failures"],
             avg_score=sum(strategy["scores"]) / len(strategy["scores"]) if strategy["scores"] else 50.0,
         )
+
+    def get_strategy_with_confidence(
+        self,
+        category: str,
+        strategy_key: str,
+    ) -> Optional[dict]:
+        """Get strategy data with full confidence information.
+
+        Extended version that includes all meta-controller relevant data.
+
+        Args:
+            category: Category (frameworks, architectures, tools).
+            strategy_key: Strategy identifier.
+
+        Returns:
+            Extended score dictionary with confidence metrics.
+        """
+        base_score = self.get_score(category, strategy_key)
+        if not base_score:
+            return None
+
+        strategy = self.strategies[category][strategy_key]
+
+        # Compute additional metrics
+        scores = strategy.get("scores", [])
+        repair_count = strategy.get("repair_count", 0)
+        last_updated = strategy.get("last_updated", "")
+
+        # Trend analysis (last 5 vs previous 5)
+        trend = "stable"
+        if len(scores) >= 10:
+            recent_avg = sum(scores[-5:]) / 5
+            older_avg = sum(scores[-10:-5]) / 5
+            if recent_avg > older_avg + 5:
+                trend = "improving"
+            elif recent_avg < older_avg - 5:
+                trend = "declining"
+
+        return {
+            "strategy": strategy_key,
+            "category": category,
+            **base_score,
+            "successes": strategy["successes"],
+            "failures": strategy["failures"],
+            "avg_score": sum(scores) / len(scores) if scores else 0,
+            "repair_count": repair_count,
+            "trend": trend,
+            "last_updated": last_updated,
+        }
+
+    def get_ranking_with_confidence(self, category: str, min_samples: int = 2) -> list[dict]:
+        """Get ranked list with full confidence data.
+
+        Args:
+            category: Category to rank.
+            min_samples: Minimum samples required for ranking.
+
+        Returns:
+            List of strategies with full confidence data, sorted by adjusted score.
+        """
+        if category not in self.strategies:
+            return []
+
+        rankings = []
+        for strategy_key in self.strategies[category]:
+            data = self.get_strategy_with_confidence(category, strategy_key)
+            if data and data.get("samples", 0) >= min_samples:
+                rankings.append(data)
+
+        rankings.sort(key=lambda x: x.get("adjusted_score", 0), reverse=True)
+        return rankings
     
     def get_ranking(self, category: str, min_samples: int = 2) -> list[dict]:
         """Get ranked list of strategies in a category.
