@@ -17,11 +17,18 @@ class TestStateMachine:
     def test_valid_transitions(self):
         sm = StateMachine()
         sm.transition(State.PLANNING)
-        assert sm.state == State.PLANNING
+        sm.transition(State.PRE_VALIDATING)
+        assert sm.state == State.PRE_VALIDATING
         sm.transition(State.EXECUTING)
         assert sm.state == State.EXECUTING
-        sm.transition(State.AGGREGATING)
-        assert sm.state == State.AGGREGATING
+        sm.transition(State.REPLANNING)
+        assert sm.state == State.REPLANNING
+        sm.transition(State.BUILDING)
+        assert sm.state == State.BUILDING
+        sm.transition(State.VALIDATING)
+        assert sm.state == State.VALIDATING
+        sm.transition(State.RUNNING)
+        assert sm.state == State.RUNNING
         sm.transition(State.COMPLETED)
         assert sm.state == State.COMPLETED
 
@@ -46,10 +53,10 @@ class TestStateMachine:
     def test_history_tracking(self):
         sm = StateMachine()
         sm.transition(State.PLANNING)
-        sm.transition(State.EXECUTING)
+        sm.transition(State.PRE_VALIDATING)
         assert len(sm.history) == 2
         assert sm.history[0] == (State.INIT, State.PLANNING)
-        assert sm.history[1] == (State.PLANNING, State.EXECUTING)
+        assert sm.history[1] == (State.PLANNING, State.PRE_VALIDATING)
 
     def test_callback_on_transition(self):
         transitions = []
@@ -72,5 +79,6 @@ class TestStateMachine:
         """Planning phase might complete without execution (e.g., just showing the plan)."""
         sm = StateMachine()
         sm.transition(State.PLANNING)
+        sm.transition(State.PRE_VALIDATING)
         sm.transition(State.COMPLETED)
         assert sm.state == State.COMPLETED

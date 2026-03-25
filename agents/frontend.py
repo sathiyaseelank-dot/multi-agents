@@ -4,14 +4,18 @@ import logging
 import os
 from typing import Any, Optional
 
-from .base_agent import AgentConfig, BaseAgent
-from parsing.extractor import extract_json, extract_code_blocks
+from .base_agent import (
+    AgentConfig,
+    BaseAgent,
+    manifest_output_instructions,
+    normalize_manifest_output,
+)
 
 logger = logging.getLogger(__name__)
 
 FRONTEND_PROMPT_TEMPLATE = """Write UI code for: {task_description}
 {context_section}
-Put code in fenced blocks with language tags."""
+{output_section}"""
 
 
 class FrontendAgent(BaseAgent):
@@ -42,10 +46,24 @@ class FrontendAgent(BaseAgent):
             parts = []
             if context.get("epic"):
                 parts.append(f"Project: {context['epic']}")
+            if context.get("directory_tree"):
+                parts.append("Workspace tree:")
+                parts.append(context["directory_tree"])
             if context.get("completed_tasks"):
                 parts.append("Previously completed work:")
                 for ct in context["completed_tasks"]:
                     parts.append(f"  - {ct.get('title', 'Unknown')}: {ct.get('summary', 'done')}")
+            if context.get("changed_files"):
+                parts.append("Changed files:")
+                for item in context["changed_files"][:4]:
+                    parts.append(f"  - {item['path']}")
+                    if item.get("diff"):
+                        parts.append(f"```diff\n{item['diff'][:2000]}\n```")
+            if context.get("workspace_files"):
+                parts.append("Relevant file contents:")
+                for item in context["workspace_files"][:4]:
+                    parts.append(f"File: {item['path']}")
+                    parts.append(f"```text\n{item.get('content', '')[:3000]}\n```")
             if context.get("files_created"):
                 parts.append(f"Existing files: {', '.join(context['files_created'])}")
             if parts:
@@ -54,28 +72,8 @@ class FrontendAgent(BaseAgent):
         return FRONTEND_PROMPT_TEMPLATE.format(
             task_description=task_description,
             context_section=context_section,
+            output_section=manifest_output_instructions("frontend"),
         )
 
     def parse_output(self, raw_output: str) -> Any:
-        json_result = extract_json(raw_output)
-        if json_result and isinstance(json_result, dict) and json_result.get("code"):
-            return json_result
-
-        blocks = extract_code_blocks(raw_output)
-        if blocks:
-            return {
-                "code_blocks": blocks,
-                "summary": f"Generated {len(blocks)} code block(s)",
-                "files_created": [],
-            }
-
-        from parsing.sanitizer import clean_output
-        cleaned = clean_output(raw_output)
-        if cleaned:
-            return {
-                "raw_text": cleaned,
-                "summary": "Raw text output (no code blocks detected)",
-                "code_blocks": [],
-                "files_created": [],
-            }
-        return None
+        return normalize_manifest_output(raw_output, "frontend")

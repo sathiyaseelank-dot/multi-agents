@@ -81,6 +81,7 @@ class TestContextAccumulator:
         assert context["epic"] == "Test epic"
         assert context["completed_tasks"] == []
         assert context["files_created"] == []
+        assert context["changed_files"] == []
 
     def test_build_context_with_dependencies(self):
         """Test building context with dependencies."""
@@ -102,6 +103,7 @@ class TestContextAccumulator:
         assert len(context["files_created"]) == 2
         assert "schema.sql" in context["files_created"]
         assert "api.py" in context["files_created"]
+        assert len(context["workspace_files"]) == 2
 
     def test_build_context_nonexistent_dependency(self):
         """Test building context with nonexistent dependency."""
@@ -154,3 +156,20 @@ class TestContextAccumulator:
         for i in range(5):
             assert f"task-{i:03d}" in results
             assert results[f"task-{i:03d}"]["title"] == f"Task {i}"
+
+    def test_changed_files_include_diff_and_content(self):
+        acc = ContextAccumulator()
+        acc.add_result("task-001", "Task 1", {
+            "summary": "Done",
+            "files": [{"path": "backend/app.py", "content": "x = 1\n", "operation": "create"}],
+        })
+        acc.add_result("task-002", "Task 2", {
+            "summary": "Done",
+            "files": [{"path": "backend/app.py", "content": "x = 2\n", "operation": "update"}],
+        })
+
+        context = acc.build_context(["task-002"])
+        assert context["changed_files"][0]["path"] == "backend/app.py"
+        assert "x = 1" in context["changed_files"][0]["previous_content"]
+        assert "x = 2" in context["changed_files"][0]["content"]
+        assert "--- backend/app.py:before" in context["changed_files"][0]["diff"]

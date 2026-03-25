@@ -82,6 +82,12 @@ def _defaults() -> dict:
             "timeout_seconds": 120, "retry_count": 3,
             "retry_backoff_seconds": 2, "env_vars": {},
         },
+        "codex_reviewer": {
+            "name": "codex-reviewer", "role": "reviewer",
+            "command": "codex", "subcommand": "exec", "args": [],
+            "timeout_seconds": 90, "retry_count": 2,
+            "retry_backoff_seconds": 2, "env_vars": {},
+        },
         "opencode": {
             "name": "opencode", "role": "backend",
             "command": "opencode", "subcommand": "run", "args": [],

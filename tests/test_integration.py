@@ -10,11 +10,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agents.base_agent import AgentConfig
-from agents.planner import PlannerAgent
+from agents.planner import PlanReviewerAgent, PlannerAgent
 from agents.backend import BackendAgent
 from agents.frontend import FrontendAgent
 from agents.tester import TesterAgent
 from orchestrator.events import EventType
+import orchestrator.orchestrator as orchestrator_module
 from orchestrator.orchestrator import Orchestrator, AGENT_REGISTRY
 from orchestrator.task_manager import TaskStatus
 
@@ -35,10 +36,35 @@ def mock_config(script: str, **kwargs) -> AgentConfig:
 
 
 def make_mock_orchestrator(tmp_path, planner_script="mock_codex.py",
+                            reviewer_script="mock_reviewer_approve.py",
                             backend_script="mock_opencode.py",
                             frontend_script="mock_gemini.py",
                             tester_script="mock_kilo.py") -> Orchestrator:
     """Create an orchestrator wired to mock agents."""
+    def fake_resolve_dependencies(project_dir: str):
+        requirements_path = Path(project_dir) / "requirements.txt"
+        requirements_path.write_text("")
+        return {
+            "requirements": str(requirements_path),
+            "package_json": None,
+            "python_dependencies": [],
+            "frontend_dependencies": [],
+        }
+
+    orchestrator_module.resolve_dependencies = fake_resolve_dependencies
+    orchestrator_module.validate_project = lambda project_dir, expected_files=None: {
+        "success": True,
+        "errors": [],
+        "checked_files": [],
+    }
+    orchestrator_module.execute_project = lambda project_dir: {
+        "success": True,
+        "logs": "",
+        "errors": [],
+        "log_entries": [],
+        "entrypoint": str(Path(project_dir) / "backend" / "app.py"),
+    }
+
     orch = Orchestrator(
         log_dir=str(tmp_path / "logs"),
         memory_dir=str(tmp_path / "memory"),
@@ -53,6 +79,14 @@ def make_mock_orchestrator(tmp_path, planner_script="mock_codex.py",
         timeout_seconds=10, retry_count=1, retry_backoff_seconds=0,
     ))
     orch.planner = planner
+    reviewer = PlanReviewerAgent(config=AgentConfig(
+        name="codex-reviewer",
+        role="reviewer",
+        command="python3",
+        args=[str(MOCK_DIR / reviewer_script)],
+        timeout_seconds=10, retry_count=1, retry_backoff_seconds=0,
+    ))
+    orch.reviewer = reviewer
 
     # Override workers
     orch._agents["opencode"] = BackendAgent(config=mock_config(
@@ -66,13 +100,14 @@ def make_mock_orchestrator(tmp_path, planner_script="mock_codex.py",
         args=[str(MOCK_DIR / tester_script)],
         timeout_seconds=10, retry_count=1, retry_backoff_seconds=0,
     ))
+    orch.evaluator = type("MockEvaluator", (), {"is_available": lambda self: False})()
 
     return orch
 
 
 class TestFullPipeline:
     def test_plan_to_completion(self, tmp_path):
-        """Full pipeline: plan → parallel execute → aggregate → build project."""
+        """Full pipeline: plan → execute → build → validate → run."""
         orch = make_mock_orchestrator(tmp_path)
         result = asyncio.run(orch.run("Build a mock application"))
 
@@ -85,7 +120,7 @@ class TestFullPipeline:
         assert summary["counts"].get("failed", 0) == 0
 
         # Project structure should be created
-        project_dir = tmp_path / "project"
+        project_dir = Path(result["project_dir"])
         assert project_dir.exists()
         assert (project_dir / "backend").exists()
         assert (project_dir / "frontend").exists()
@@ -97,9 +132,20 @@ class TestFullPipeline:
         assert len(backend_files) >= 1  # opencode emits Python
         assert len(tests_files) >= 1  # kilo emits Python tests
         
-        # Check for entrypoint and requirements
+        # Check for entrypoint and dependency manifest
         assert (project_dir / "backend" / "app.py").exists()
-        assert (project_dir / "backend" / "requirements.txt").exists()
+        assert (project_dir / "requirements.txt").exists()
+        assert result["goal_analysis"]["refined_goal"]
+        assert result["planning_trace"]["review_1"]["approval"] is True
+        assert result["review_iterations"] == 1
+        assert result["final_review"]["approval"] is True
+        assert "prevalidation_result" in result
+        assert result["validation_result"]["success"] is True
+        assert result["runtime_result"]["success"] is True
+        assert "confidence" in result
+        assert "evaluation_result" in result
+        memory_file = tmp_path / "memory" / "run-memory.json"
+        assert memory_file.exists()
 
     def test_plan_saved_to_memory(self, tmp_path):
         orch = make_mock_orchestrator(tmp_path)
@@ -112,6 +158,11 @@ class TestFullPipeline:
         plan_data = json.loads(plan_file.read_text())
         assert "plan" in plan_data
         assert "tasks" in plan_data["plan"]
+
+        results_file = tmp_path / "memory" / f"results-{session_id}.json"
+        results_data = json.loads(results_file.read_text())
+        assert "goal_analysis" in results_data
+        assert "prevalidation" in results_data
 
     def test_checkpoint_written_after_each_phase(self, tmp_path):
         orch = make_mock_orchestrator(tmp_path)
@@ -133,9 +184,13 @@ class TestFullPipeline:
         event_types = [event["type"] for event in orch.events.get_history()]
 
         assert EventType.PLAN_CREATED.value in event_types
+        assert EventType.PLAN_REVIEW_STARTED.value in event_types
+        assert EventType.PLAN_REVIEW_COMPLETED.value in event_types
+        assert EventType.PLAN_APPROVED.value in event_types
         assert EventType.PHASE_STARTED.value in event_types
         assert EventType.TASK_STARTED.value in event_types
         assert EventType.TASK_COMPLETED.value in event_types
+        assert EventType.PROJECT_BUILT.value in event_types
         assert EventType.RUN_COMPLETED.value in event_types
 
 
@@ -167,6 +222,52 @@ class TestFallbackRouting:
         event_types = [event["type"] for event in orch.events.get_history()]
         assert EventType.AGENT_RETRY.value in event_types
         assert EventType.TASK_FAILED.value in event_types
+
+
+class TestPlanningDebate:
+    def test_reviewer_requests_revision_then_approves(self, tmp_path):
+        orch = make_mock_orchestrator(
+            tmp_path,
+            planner_script="mock_planner_debate.py",
+            reviewer_script="mock_reviewer_debate.py",
+        )
+
+        result = asyncio.run(orch.run("Build a debated application"))
+
+        assert result["status"] == "completed"
+        assert result["review_iterations"] == 2
+        assert result["planning_trace"]["initial_plan"]["tasks"][-1]["id"] == "task-002"
+        assert result["planning_trace"]["review_1"]["approval"] is False
+        assert result["planning_trace"]["revised_plan"]["tasks"][-1]["id"] == "task-003"
+        assert result["planning_trace"]["review_2"]["approval"] is True
+        assert result["final_review"]["approval"] is True
+
+    def test_reviewer_rejects_twice_and_planning_fails(self, tmp_path):
+        orch = make_mock_orchestrator(
+            tmp_path,
+            planner_script="mock_planner_debate.py",
+            reviewer_script="mock_reviewer_reject.py",
+        )
+
+        result = asyncio.run(orch.run("Build a debated application"))
+
+        assert result["status"] == "failed"
+        assert result["review_iterations"] == 2
+        assert result["planning_trace"]["review_2"]["approval"] is False
+        assert result["final_review"]["approval"] is False
+
+    def test_malformed_reviewer_output_fails_planning(self, tmp_path):
+        orch = make_mock_orchestrator(
+            tmp_path,
+            planner_script="mock_planner_debate.py",
+            reviewer_script="mock_reviewer_invalid.py",
+        )
+
+        result = asyncio.run(orch.run("Build a debated application"))
+
+        assert result["status"] == "failed"
+        assert result["planning_trace"]["initial_plan"] is not None
+        assert result["review_iterations"] == 0
 
 
 class TestResume:

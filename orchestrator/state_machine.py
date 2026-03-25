@@ -10,8 +10,13 @@ logger = logging.getLogger(__name__)
 class State(Enum):
     INIT = "INIT"
     PLANNING = "PLANNING"
+    PRE_VALIDATING = "PRE_VALIDATING"
     EXECUTING = "EXECUTING"
-    AGGREGATING = "AGGREGATING"
+    REPLANNING = "REPLANNING"
+    BUILDING = "BUILDING"
+    VALIDATING = "VALIDATING"
+    RUNNING = "RUNNING"
+    REPAIRING = "REPAIRING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
@@ -19,9 +24,14 @@ class State(Enum):
 # Valid transitions: from_state -> set of allowed to_states
 TRANSITIONS = {
     State.INIT: {State.PLANNING, State.FAILED},
-    State.PLANNING: {State.EXECUTING, State.COMPLETED, State.FAILED},
-    State.EXECUTING: {State.AGGREGATING, State.FAILED},
-    State.AGGREGATING: {State.COMPLETED, State.EXECUTING, State.FAILED},
+    State.PLANNING: {State.PRE_VALIDATING, State.EXECUTING, State.COMPLETED, State.FAILED},
+    State.PRE_VALIDATING: {State.EXECUTING, State.COMPLETED, State.FAILED},
+    State.EXECUTING: {State.REPLANNING, State.BUILDING, State.FAILED},
+    State.REPLANNING: {State.EXECUTING, State.BUILDING, State.FAILED},
+    State.BUILDING: {State.VALIDATING, State.FAILED},
+    State.VALIDATING: {State.RUNNING, State.REPAIRING, State.FAILED},
+    State.RUNNING: {State.COMPLETED, State.REPAIRING, State.FAILED},
+    State.REPAIRING: {State.VALIDATING, State.RUNNING, State.FAILED},
     State.COMPLETED: set(),
     State.FAILED: set(),
 }

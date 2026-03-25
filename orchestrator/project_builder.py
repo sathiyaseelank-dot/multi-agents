@@ -1,25 +1,7 @@
-"""Project Builder — Transform raw agent outputs into a structured runnable project.
-
-This module converts flat generated code artifacts into a coherent project structure
-with proper directory organization, entrypoints, and dependency files.
-
-Example output structure::
-
-    project/
-    ├── backend/
-    │   ├── app.py              # Flask entrypoint
-    │   ├── auth.py             # Generated backend code
-    │   ├── models.py
-    │   └── requirements.txt    # Dependencies
-    ├── frontend/
-    │   ├── index.js            # Generated frontend code
-    │   └── components.jsx
-    └── tests/
-        ├── test_auth.py        # Generated test code
-        └── test_api.py
-"""
+"""Project Builder — deterministically assemble task manifests into a project tree."""
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -308,85 +290,22 @@ def write_files(
     task_results: dict,
     project_dirs: dict[str, Path],
 ) -> list[str]:
-    """Write code blocks to files in appropriate directories.
-
-    Args:
-        task_results: Dictionary of task results from orchestrator.
-        project_dirs: Dictionary mapping directory names to Paths.
-
-    Returns:
-        List of created file paths.
-    """
+    """Write manifest files to the project tree in deterministic order."""
     created_files = []
+    project_root = next(iter(project_dirs.values())).parent if project_dirs else Path(".")
+    manifest_entries = []
 
     for task_id, info in task_results.items():
-        task_type = info.get("type", "backend")
-        task_title = info.get("title", task_id)
-        code_blocks = info.get("code_blocks", [])
+        manifest_entries.extend(_normalize_task_result(task_id, info))
 
-        # Determine target directory
-        target_dir_name = TYPE_TO_DIR.get(task_type, "backend")
-        target_dir = project_dirs.get(target_dir_name, project_dirs.get("backend"))
-
-        if not target_dir:
-            logger.warning(f"No target directory for task type: {task_type}")
-            continue
-
-        if not code_blocks:
-            # No code blocks — skip or write raw text if present
-            raw = info.get("raw_text", "")
-            if raw:
-                filepath = target_dir / f"{_slugify(task_title)}.txt"
-                filepath.write_text(raw)
-                created_files.append(str(filepath))
-                logger.info(f"Wrote raw output: {filepath}")
-            continue
-
-        # Track files created for this task (for naming)
-        task_file_count = 0
-
-        for i, block in enumerate(code_blocks):
-            lang = block.get("language", "text")
-            code = block.get("code", "")
-
-            if not code.strip():
-                continue
-
-            ext = _get_extension(lang, task_type)
-            filename = _infer_filename(code, task_type, task_title)
-
-            # Handle multiple blocks — add suffix
-            if len(code_blocks) > 1:
-                # Insert number before extension
-                name_parts = filename.rsplit(".", 1)
-                if len(name_parts) == 2:
-                    filename = f"{name_parts[0]}-{i + 1}.{name_parts[1]}"
-                else:
-                    filename = f"{filename}-{i + 1}"
-
-            # Ensure test files have test_ prefix
-            if task_type == "testing" and not filename.startswith("test_"):
-                filename = f"test_{filename}"
-
-            filepath = target_dir / filename
-
-            # Handle duplicate filenames
-            if filepath.exists():
-                base = filename.rsplit(".", 1)[0]
-                ext_part = filename.rsplit(".", 1)[1] if "." in filename else ""
-                counter = 1
-                while filepath.exists():
-                    if ext_part:
-                        filename = f"{base}-{counter}.{ext_part}"
-                    else:
-                        filename = f"{base}-{counter}"
-                    filepath = target_dir / filename
-                    counter += 1
-
-            filepath.write_text(code + "\n")
-            created_files.append(str(filepath))
-            task_file_count += 1
-            logger.info(f"Wrote {lang} code: {filepath} ({len(code.splitlines())} lines)")
+    for entry in sorted(manifest_entries, key=lambda item: item["path"]):
+        rel_path = _safe_relative_path(entry["path"])
+        filepath = project_root / rel_path
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        content = entry.get("content", "")
+        filepath.write_text(content if content.endswith("\n") else content + "\n")
+        created_files.append(str(filepath))
+        logger.info("Wrote artifact: %s", filepath)
 
     return created_files
 
@@ -410,6 +329,8 @@ def create_entrypoint(project_dirs: dict[str, Path], created_files: list[str]) -
 
     if not backend_files:
         return None
+    if any(Path(path).name == "app.py" for path in backend_files):
+        return str(backend_dir / "app.py")
 
     # Find module names to import (excluding app.py itself)
     modules_to_import = []
@@ -529,30 +450,7 @@ def build_project(
     task_results: dict,
     project_dir: str = "project",
 ) -> dict:
-    """Build a structured project from task results.
-
-    This is the main entry point. It:
-    1. Creates the directory structure (backend/, frontend/, tests/)
-    2. Writes code files to appropriate directories
-    3. Creates a Flask entrypoint (backend/app.py)
-    4. Generates requirements.txt
-
-    Args:
-        task_results: Dictionary of task results from orchestrator.
-            Each key is a task_id, value contains:
-            - type: task type (backend/frontend/testing)
-            - title: task title
-            - code_blocks: list of {language, code} dicts
-        project_dir: Root directory for the generated project.
-
-    Returns:
-        Dictionary with build results:
-        - project_dir: Path to created project
-        - files_created: List of all created file paths
-        - entrypoint: Path to Flask entrypoint (if created)
-        - requirements: Path to requirements.txt (if created)
-        - structure: Dict of directory paths
-    """
+    """Build a structured project from task results."""
     logger.info(f"Building project in {project_dir}/")
 
     # Step 1: Create directory structure
@@ -563,8 +461,8 @@ def build_project(
 
     # Step 3: Create Flask entrypoint if backend exists
     has_backend = any(
-        info.get("type") == "backend" and info.get("code_blocks")
-        for info in task_results.values()
+        info.get("type") == "backend" and _normalize_task_result(task_id, info)
+        for task_id, info in task_results.items()
     )
     entrypoint = None
     if has_backend:
@@ -572,25 +470,23 @@ def build_project(
 
     # Step 4: Generate requirements.txt (with dependency scanning)
     has_tests = any(
-        info.get("type") == "testing" and info.get("code_blocks")
-        for info in task_results.values()
+        info.get("type") == "testing" and _normalize_task_result(task_id, info)
+        for task_id, info in task_results.items()
     )
 
-    # Extract backend files for dependency scanning
+    # Extract normalized backend Python artifacts for dependency scanning.
     backend_files = []
-    for info in task_results.values():
+    for task_id, info in task_results.items():
         if info.get("type") != "backend":
             continue
-        for block in info.get("code_blocks", []):
-            if block.get("language") in ("python", "py"):
+        for artifact in _normalize_task_result(task_id, info):
+            if artifact.get("path", "").endswith(".py"):
                 backend_files.append({
-                    "content": block.get("code", ""),
+                    "content": artifact.get("content", ""),
                     "language": "python",
                 })
 
     requirements = generate_requirements(structure, has_backend, has_tests, backend_files)
-
-    # Build summary
     result = {
         "project_dir": project_dir,
         "files_created": created_files,
@@ -599,7 +495,6 @@ def build_project(
         "structure": {k: str(v) for k, v in structure.items()},
     }
 
-    # Log summary
     logger.info(f"Project built: {len(created_files)} files created")
     if entrypoint:
         logger.info(f"Entrypoint: {entrypoint}")
@@ -607,3 +502,71 @@ def build_project(
         logger.info(f"Requirements: {requirements}")
 
     return result
+
+
+def _normalize_task_result(task_id: str, info: dict) -> list[dict]:
+    task_type = info.get("type", "backend")
+    task_title = info.get("title", task_id)
+
+    manifest_files = info.get("files") or []
+    normalized = []
+    for item in manifest_files:
+        path = item.get("path", "")
+        content = item.get("content", "")
+        if path and str(content).strip():
+            normalized.append({
+                "path": path,
+                "content": content,
+                "operation": item.get("operation", "create"),
+            })
+
+    if normalized:
+        return normalized
+
+    code_blocks = info.get("code_blocks", [])
+    target_dir_name = TYPE_TO_DIR.get(task_type, "backend")
+    for i, block in enumerate(code_blocks):
+        lang = block.get("language", "text")
+        code = block.get("code", "")
+        if not code.strip():
+            continue
+
+        ext = _get_extension(lang, task_type)
+        filename = _infer_filename(code, task_type, task_title)
+        if len(code_blocks) > 1:
+            name_parts = filename.rsplit(".", 1)
+            if len(name_parts) == 2:
+                filename = f"{name_parts[0]}-{i + 1}.{name_parts[1]}"
+            else:
+                filename = f"{filename}-{i + 1}"
+        if task_type == "testing" and not filename.startswith("test_"):
+            filename = f"test_{filename}"
+        if not os.path.splitext(filename)[1]:
+            filename = f"{filename}{ext}"
+        normalized.append({
+            "path": f"{target_dir_name}/{filename}",
+            "content": code,
+            "operation": "create",
+        })
+
+    if normalized:
+        return normalized
+
+    raw = info.get("raw_text", "")
+    if raw:
+        return [{
+            "path": f"{target_dir_name}/{_slugify(task_title)}.txt",
+            "content": raw,
+            "operation": "create",
+        }]
+    return []
+
+
+def _safe_relative_path(path: str) -> Path:
+    rel_path = Path(path)
+    if rel_path.is_absolute():
+        raise ValueError(f"Artifact paths must be relative: {path}")
+    parts = [part for part in rel_path.parts if part not in ("", ".")]
+    if any(part == ".." for part in parts):
+        raise ValueError(f"Artifact path escapes project root: {path}")
+    return Path(*parts)
