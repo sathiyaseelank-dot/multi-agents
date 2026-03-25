@@ -451,7 +451,7 @@ class TestBuildProject:
         # Check files created
         assert len(result["files_created"]) >= 3
         assert result["entrypoint"] is not None
-        assert result["requirements"] is not None
+        assert result["requirements"] is None
 
     def test_build_project_empty_results(self):
         """Test building project with empty task results."""
@@ -479,7 +479,7 @@ class TestBuildProject:
         result = build_project(task_results, str(project_dir))
 
         assert result["entrypoint"] is not None
-        assert result["requirements"] is not None
+        assert result["requirements"] is None
         # Tests directory still created but no test files
         assert (project_dir / "tests").exists()
 

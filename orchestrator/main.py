@@ -181,6 +181,14 @@ async def main():
     else:
         print(f"\n  Status: {result['status'].upper()}")
         print(f"  Session: {result['session_id']}")
+        if result.get("project_dir"):
+            print(f"  Project: {result['project_dir']}")
+        if result.get("validation_result"):
+            validation_status = "passed" if result["validation_result"].get("success") else "failed"
+            print(f"  Validation: {validation_status}")
+        if result.get("runtime_result"):
+            runtime_status = "passed" if result["runtime_result"].get("success") else "failed"
+            print(f"  Runtime: {runtime_status}")
 
 
 if __name__ == "__main__":

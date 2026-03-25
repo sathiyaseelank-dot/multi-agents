@@ -66,6 +66,39 @@ class TaskManager:
         logger.info(f"Loaded {len(tasks)} tasks from plan")
         return tasks
 
+    def apply_replan(self, plan: dict) -> list[Task]:
+        """Merge a replanned task graph into the existing task set."""
+        updated = []
+        for task_data in plan.get("tasks", []):
+            task_id = task_data.get("id", f"task-{uuid.uuid4().hex[:8]}")
+            existing = self.tasks.get(task_id)
+            if existing and existing.status == TaskStatus.SUCCESS:
+                continue
+
+            task = existing or Task(
+                id=task_id,
+                title=task_data.get("title", "Untitled"),
+                description=task_data.get("description", ""),
+                agent=task_data.get("agent", "opencode"),
+                type=task_data.get("type", "backend"),
+            )
+            task.title = task_data.get("title", task.title)
+            task.description = task_data.get("description", task.description)
+            task.agent = task_data.get("agent", task.agent)
+            task.type = task_data.get("type", task.type)
+            task.dependencies = task_data.get("dependencies", task.dependencies)
+            task.status = TaskStatus.PENDING
+            task.error = None
+            task.result = None
+            task.started_at = None
+            task.completed_at = None
+            task.execution_time = 0.0
+            self.tasks[task_id] = task
+            updated.append(task)
+
+        logger.info("Applied replan with %d task updates", len(updated))
+        return updated
+
     def get_task(self, task_id: str) -> Optional[Task]:
         return self.tasks.get(task_id)
 

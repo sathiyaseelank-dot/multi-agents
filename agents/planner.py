@@ -1,7 +1,7 @@
 """Codex planner agent — breaks user tasks into structured subtasks."""
 
+import json
 import logging
-from pathlib import Path
 from typing import Any, Optional
 
 from .base_agent import AgentConfig, BaseAgent
@@ -67,7 +67,22 @@ class PlannerAgent(BaseAgent):
         """Build the planner prompt from the template."""
         prompt = PLANNER_PROMPT_TEMPLATE.format(task_description=task_description)
         if context:
-            prompt += f"\n\nAdditional context:\n{context}"
+            sections = []
+            goal_analysis = context.get("goal_analysis")
+            if goal_analysis:
+                sections.append("Goal analysis:")
+                sections.append(json.dumps(goal_analysis, indent=2))
+            similar_runs = context.get("similar_runs")
+            if similar_runs:
+                sections.append("Relevant past runs:")
+                sections.append(json.dumps(similar_runs, indent=2))
+            failure_feedback = context.get("failure_feedback")
+            if failure_feedback:
+                sections.append("Failure feedback for replanning:")
+                sections.append(json.dumps(failure_feedback, indent=2))
+            if not sections:
+                sections.append(json.dumps(context, indent=2))
+            prompt += "\n\nAdditional context:\n" + "\n".join(sections)
         return prompt
 
     def parse_output(self, raw_output: str) -> Any:
