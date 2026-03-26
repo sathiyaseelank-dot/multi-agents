@@ -3,6 +3,33 @@ import './styles.css';
 
 const API_BASE = 'http://localhost:5000/api/orchestrator';
 
+const PLAN_EVENT_TYPES = ['plan_created', 'plan_revised'];
+
+function getLivePlan(session) {
+  if (!session) return null;
+
+  if (session.plan) return session.plan;
+  if (session.result?.plan) return session.result.plan;
+  if (session.result?.planning_trace?.revised_plan) return session.result.planning_trace.revised_plan;
+  if (session.result?.planning_trace?.initial_plan) return session.result.planning_trace.initial_plan;
+  if (session.planning_trace?.revised_plan) return session.planning_trace.revised_plan;
+  if (session.planning_trace?.initial_plan) return session.planning_trace.initial_plan;
+
+  const latestPlanEvent = [...(session.events || [])]
+    .reverse()
+    .find((event) => PLAN_EVENT_TYPES.includes(event.type) && event.data?.plan);
+
+  return latestPlanEvent?.data?.plan || null;
+}
+
+function getPlanningTrace(session) {
+  return session?.result?.planning_trace || session?.planning_trace || null;
+}
+
+function getLiveSummary(session) {
+  return session?.result?.summary || session?.summary || null;
+}
+
 function App() {
   const [task, setTask] = useState('');
   const [sessions, setSessions] = useState([]);
@@ -55,14 +82,20 @@ function App() {
   const pollStatus = async (sessionId) => {
     const poll = async () => {
       try {
-        const response = await fetch(`${API_BASE}/status/${sessionId}`);
-        const data = await response.json();
+        const statusRes = await fetch(`${API_BASE}/status/${sessionId}`);
+        const statusData = await statusRes.json();
         
-        if (data.status === 'running') {
-          setRunningSession(data);
-          setTimeout(poll, 3000);
+        if (statusData.status === 'running') {
+          const resultsRes = await fetch(`${API_BASE}/results/${sessionId}`);
+          if (resultsRes.ok) {
+            const resultsData = await resultsRes.json();
+            setRunningSession({ ...statusData, ...resultsData });
+          } else {
+            setRunningSession(statusData);
+          }
+          setTimeout(poll, 2000);
         } else {
-          setRunningSession(data);
+          setRunningSession(statusData);
           fetchSessions();
         }
       } catch (error) {
@@ -91,6 +124,15 @@ function App() {
       default: return '#6b7280';
     }
   };
+
+  const currentPlan = getLivePlan(runningSession);
+  const planningTrace = getPlanningTrace(runningSession);
+  const planSummary = getLiveSummary(runningSession);
+  const orchestrationPhases =
+    currentPlan?.phases ||
+    planningTrace?.revised_plan?.phases ||
+    planningTrace?.initial_plan?.phases ||
+    [];
 
   return (
     <div className="app">
@@ -179,22 +221,111 @@ function App() {
                   </span>
                   <span className="session-id">{runningSession.session_id}</span>
                 </div>
-                <p className="task">{runningSession.task}</p>
+                <p className="task">{runningSession.task || runningSession.result?.goal_analysis?.original_goal}</p>
+                
                 {runningSession.status === 'running' && (
                   <div className="loading">
                     <div className="spinner"></div>
-                    <p>Executing task... This may take 2-5 minutes</p>
+                    <p>{currentPlan ? 'Executing orchestration plan below.' : 'Generating execution plan...'}</p>
                   </div>
                 )}
+
+                {currentPlan?.tasks && (
+                  <div className="plan-section">
+                    <h3>Execution Plan</h3>
+                    <div className="tasks-list">
+                      {currentPlan.tasks.map((task) => (
+                        <div key={task.id} className="task-item">
+                          <span className="task-id">{task.id}</span>
+                          <span className="task-title">{task.title}</span>
+                          <span className="task-agent">{task.agent}</span>
+                          <span className="task-meta">{task.type}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                
+                {planSummary?.tasks && (
+                  <div className="plan-progress">
+                    <h3>Plan Progress</h3>
+                    <div className="progress-bar">
+                      <div 
+                        className="progress-fill"
+                        style={{ 
+                          width: `${((planSummary.counts?.completed || 0) / (planSummary.total || 1)) * 100}%` 
+                        }}
+                      />
+                    </div>
+                    <p className="progress-text">
+                      {planSummary.counts?.completed || 0} / {planSummary.total} tasks completed
+                    </p>
+                    <div className="tasks-list">
+                      {planSummary.tasks.map((task) => (
+                        <div key={task.id} className={`task-item ${task.status}`}>
+                          <span className="task-id">{task.id}</span>
+                          <span className="task-title">{task.title}</span>
+                          <span className="task-agent">{task.agent}</span>
+                          <span className={`task-status ${task.status}`}>
+                            {task.status === 'completed' ? '✓' : task.status === 'running' ? '⟳' : task.status === 'failed' ? '✗' : '○'}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                
+                {orchestrationPhases.length > 0 && (
+                  <div className="phases">
+                    <h3>Orchestration Plan</h3>
+                    {orchestrationPhases.map((phase) => (
+                      <div key={phase.phase} className="phase-item">
+                        <span className="phase-num">Phase {phase.phase}</span>
+                        <span className="phase-desc">{phase.description}</span>
+                        <span className="phase-tasks">{phase.task_ids.join(', ')}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {planningTrace && (
+                  <div className="plan-section">
+                    <h3>Planning Review</h3>
+                    <div className="review-grid">
+                      {planningTrace.review_1 && (
+                        <div className="review-item">
+                          <strong>Review 1</strong>
+                          <span>{planningTrace.review_1.approval ? 'Approved' : 'Rejected'}</span>
+                          <span>Confidence: {planningTrace.review_1.confidence ?? 'n/a'}</span>
+                        </div>
+                      )}
+                      {planningTrace.review_2 && (
+                        <div className="review-item">
+                          <strong>Review 2</strong>
+                          <span>{planningTrace.review_2.approval ? 'Approved' : 'Rejected'}</span>
+                          <span>Confidence: {planningTrace.review_2.confidence ?? 'n/a'}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+                
                 {runningSession.events && runningSession.events.length > 0 && (
                   <div className="events">
-                    <h3>Recent Events:</h3>
+                    <h3>Recent Events</h3>
                     <div className="events-list">
-                      {runningSession.events.slice(-10).map((event, idx) => (
+                      {runningSession.events.slice(-15).map((event, idx) => (
                         <div key={idx} className="event-item">
                           <span className="event-type">{event.type}</span>
                           <span className="event-data">
-                            {JSON.stringify(event.data).slice(0, 100)}...
+                            {event.type === 'phase_started' && `Phase ${event.data?.phase}`}
+                            {event.type === 'phase_completed' && `Phase ${event.data?.phase} done`}
+                            {event.type === 'task_started' && `${event.data?.task_id}: ${event.data?.title}`}
+                            {event.type === 'task_completed' && `${event.data?.task_id}: SUCCESS`}
+                            {event.type === 'task_failed' && `${event.data?.task_id}: FAILED`}
+                            {event.type === 'info' && event.data?.message?.slice(0, 60)}
+                            {!['phase_started', 'phase_completed', 'task_started', 'task_completed', 'task_failed', 'info'].includes(event.type) && 
+                              JSON.stringify(event.data)?.slice(0, 80)}
                           </span>
                         </div>
                       ))}
