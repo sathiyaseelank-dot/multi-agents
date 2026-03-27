@@ -227,6 +227,42 @@ class UserAPITestCase(unittest.TestCase):
         data = response.get_json()
         self.assertIn("error", data)
 
+    def test_login_success(self):
+        self.client.post(
+            "/api/users",
+            json={
+                "username": "testuser",
+                "email": "test@example.com",
+                "password": "password123",
+            },
+        )
+        response = self.client.post(
+            "/api/users/login",
+            json={"username": "testuser", "password": "password123"},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertIn("access_token", data)
+        self.assertIn("user", data)
+        self.assertEqual(data["user"]["username"], "testuser")
+
+    def test_login_invalid_credentials(self):
+        response = self.client.post(
+            "/api/users/login",
+            json={"username": "nonexistent", "password": "wrongpass"},
+        )
+        self.assertEqual(response.status_code, 401)
+        data = response.get_json()
+        self.assertIn("error", data)
+
+    def test_login_missing_fields(self):
+        response = self.client.post("/api/users/login", json={"username": "test"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_get_users_requires_auth(self):
+        response = self.client.get("/api/users")
+        self.assertEqual(response.status_code, 401)
+
 
 if __name__ == "__main__":
     unittest.main()

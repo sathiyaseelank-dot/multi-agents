@@ -33,6 +33,10 @@ class EventType(StrEnum):
     AGENT_RETRY = "agent_retry"
     RUN_COMPLETED = "run_completed"
     PROJECT_BUILT = "project_built"
+    ORCHESTRATION_STUCK = "orchestration_stuck"
+    ORCHESTRATION_HEAL_STARTED = "orchestration_heal_started"
+    ORCHESTRATION_HEAL_APPLIED = "orchestration_heal_applied"
+    ORCHESTRATION_HEAL_FAILED = "orchestration_heal_failed"
 
 
 @dataclass(slots=True)
@@ -110,27 +114,31 @@ class EventEmitter:
             self._write("   AI Development Team OS")
             self._write("=" * 60)
             self._write()
-            self._write(f'  Resuming session: {data.get("session_id", self.session_id)}')
+            self._write(
+                f"  Resuming session: {data.get('session_id', self.session_id)}"
+            )
             self._write()
             self._write(
-                f'  Checkpoint: {data.get("completed", 0)} completed, '
-                f'{data.get("pending", 0)} pending'
+                f"  Checkpoint: {data.get('completed', 0)} completed, "
+                f"{data.get('pending', 0)} pending"
             )
             self._write()
             if not self.summary_only:
                 self._write("  Task status:")
                 self._write("  " + "-" * 40)
                 for task in data.get("tasks", []):
-                    self._write(f'    [{task["icon"]}] {task["task_id"]}: {task["title"]}')
+                    self._write(
+                        f"    [{task['icon']}] {task['task_id']}: {task['title']}"
+                    )
                 self._write()
             return
 
         if event_type == EventType.INFO:
-            self._write(f'  {data.get("message", "")}')
+            self._write(f"  {data.get('message', '')}")
             return
 
         if event_type == EventType.WARNING:
-            self._write(f'  [WARNING] {data.get("message", "")}')
+            self._write(f"  [WARNING] {data.get('message', '')}")
             detail = data.get("detail")
             if detail:
                 self._write(f"  {detail}")
@@ -138,7 +146,7 @@ class EventEmitter:
             return
 
         if event_type == EventType.ERROR:
-            self._write(f'  [ERROR] {data.get("message", "")}')
+            self._write(f"  [ERROR] {data.get('message', '')}")
             return
 
         if event_type == EventType.PLAN_CREATED:
@@ -152,7 +160,7 @@ class EventEmitter:
 
             if plan.get("epic"):
                 self._write()
-                self._write(f'  Epic: {plan["epic"]}')
+                self._write(f"  Epic: {plan['epic']}")
 
             self._write()
             self._write(f"  Tasks ({len(tasks)}):")
@@ -161,10 +169,12 @@ class EventEmitter:
             for task in tasks:
                 deps = task.get("dependencies", [])
                 dep_str = f" (depends on: {', '.join(deps)})" if deps else ""
-                self._write(f'    [{task.get("id", "?")}] {task.get("title", "Untitled")}')
                 self._write(
-                    f'           Agent: {task.get("agent", "?")} | '
-                    f'Type: {task.get("type", "?")}{dep_str}'
+                    f"    [{task.get('id', '?')}] {task.get('title', 'Untitled')}"
+                )
+                self._write(
+                    f"           Agent: {task.get('agent', '?')} | "
+                    f"Type: {task.get('type', '?')}{dep_str}"
                 )
 
             if phases:
@@ -174,15 +184,19 @@ class EventEmitter:
                 for phase in phases:
                     parallel = "parallel" if phase.get("parallel") else "sequential"
                     self._write(
-                        f'    Phase {phase.get("phase", "?")} ({parallel}): '
-                        f'{phase.get("description", "")}'
+                        f"    Phase {phase.get('phase', '?')} ({parallel}): "
+                        f"{phase.get('description', '')}"
                     )
-                    self._write(f'           Tasks: {", ".join(phase.get("task_ids", []))}')
+                    self._write(
+                        f"           Tasks: {', '.join(phase.get('task_ids', []))}"
+                    )
 
             execution_summary = data.get("execution_summary")
             if execution_summary:
                 self._write()
-                self._write(f'  Computed execution order ({data.get("phase_count", 0)} phases):')
+                self._write(
+                    f"  Computed execution order ({data.get('phase_count', 0)} phases):"
+                )
                 self._write(execution_summary)
 
             self._write()
@@ -191,43 +205,43 @@ class EventEmitter:
 
         if event_type == EventType.PLAN_REVIEW_STARTED:
             self._write(
-                f'  [Review {data.get("iteration", "?")}] Reviewer analyzing plan'
+                f"  [Review {data.get('iteration', '?')}] Reviewer analyzing plan"
             )
             return
 
         if event_type == EventType.PLAN_REVIEW_COMPLETED:
             approval = "APPROVED" if data.get("approval") else "REJECTED"
             self._write(
-                f'  [Review {data.get("iteration", "?")}] {approval} '
-                f'(confidence: {data.get("confidence", 0.0):.2f})'
+                f"  [Review {data.get('iteration', '?')}] {approval} "
+                f"(confidence: {data.get('confidence', 0.0):.2f})"
             )
             return
 
         if event_type == EventType.PLAN_REVISED:
             self._write(
-                f'  [Planner] Revised plan after review {data.get("iteration", "?")}'
+                f"  [Planner] Revised plan after review {data.get('iteration', '?')}"
             )
             return
 
         if event_type == EventType.PLAN_REJECTED:
             self._write(
-                f'  [Planner] Debate ended without approval after '
-                f'{data.get("review_iterations", 0)} review(s)'
+                f"  [Planner] Debate ended without approval after "
+                f"{data.get('review_iterations', 0)} review(s)"
             )
             return
 
         if event_type == EventType.PLAN_APPROVED:
             self._write(
-                f'  [Planner] Plan approved after {data.get("review_iterations", 0)} review(s)'
+                f"  [Planner] Plan approved after {data.get('review_iterations', 0)} review(s)"
             )
             return
 
         if event_type == EventType.PHASE_STARTED:
             self._write()
             self._write(
-                f'  [Phase {data.get("phase")}/{data.get("total_phases")}] '
-                f'[{data.get("mode", "").upper()}] {data.get("task_count", 0)} task(s): '
-                f'{", ".join(data.get("task_ids", []))}'
+                f"  [Phase {data.get('phase')}/{data.get('total_phases')}] "
+                f"[{data.get('mode', '').upper()}] {data.get('task_count', 0)} task(s): "
+                f"{', '.join(data.get('task_ids', []))}"
             )
             self._write("  " + "-" * 56)
             return
@@ -235,37 +249,37 @@ class EventEmitter:
         if event_type == EventType.PHASE_COMPLETED:
             counts = data.get("counts", {})
             self._write(
-                f'  [Phase {data.get("phase")}/{data.get("total_phases")}] '
-                f'Completed | Success: {counts.get("success", 0)} | '
-                f'Failed: {counts.get("failed", 0)} | Skipped: {counts.get("skipped", 0)}'
+                f"  [Phase {data.get('phase')}/{data.get('total_phases')}] "
+                f"Completed | Success: {counts.get('success', 0)} | "
+                f"Failed: {counts.get('failed', 0)} | Skipped: {counts.get('skipped', 0)}"
             )
             return
 
         if event_type == EventType.TASK_STARTED:
             self._write(
-                f'    [{data.get("task_id")}] Starting: {data.get("title")} '
-                f'(agent: {data.get("agent")})'
+                f"    [{data.get('task_id')}] Starting: {data.get('title')} "
+                f"(agent: {data.get('agent')})"
             )
             return
 
         if event_type == EventType.TASK_COMPLETED:
             self._write(
-                f'    [{data.get("task_id")}] SUCCESS ({data.get("execution_time", 0.0):.1f}s): '
-                f'{data.get("summary", "done")}'
+                f"    [{data.get('task_id')}] SUCCESS ({data.get('execution_time', 0.0):.1f}s): "
+                f"{data.get('summary', 'done')}"
             )
             return
 
         if event_type == EventType.TASK_FAILED:
             self._write(
-                f'    [{data.get("task_id")}] FAILED ({data.get("execution_time", 0.0):.1f}s): '
-                f'{data.get("error", "Unknown error")}'
+                f"    [{data.get('task_id')}] FAILED ({data.get('execution_time', 0.0):.1f}s): "
+                f"{data.get('error', 'Unknown error')}"
             )
             return
 
         if event_type == EventType.AGENT_RETRY:
             self._write(
-                f'    [{data.get("task_id")}] Trying fallback agent: '
-                f'{data.get("fallback_agent")}'
+                f"    [{data.get('task_id')}] Trying fallback agent: "
+                f"{data.get('fallback_agent')}"
             )
             return
 
@@ -291,19 +305,19 @@ class EventEmitter:
             if not self.summary_only:
                 for task in data.get("tasks", []):
                     self._write(
-                        f'    [{task["status_icon"]}] {task["task_id"]}: '
-                        f'{task["title"]} ({task["execution_time"]:.1f}s)'
+                        f"    [{task['status_icon']}] {task['task_id']}: "
+                        f"{task['title']} ({task['execution_time']:.1f}s)"
                     )
                     for block in task.get("code_blocks", []):
                         self._write(
-                            f'           {block["language"]}: {block["lines"]} lines'
+                            f"           {block['language']}: {block['lines']} lines"
                         )
 
             self._write(
-                f'\n  Total: {summary.get("total", 0)} tasks | '
-                f'Success: {counts.get("success", 0)} | '
-                f'Failed: {counts.get("failed", 0)} | '
-                f'Skipped: {counts.get("skipped", 0)}'
+                f"\n  Total: {summary.get('total', 0)} tasks | "
+                f"Success: {counts.get('success', 0)} | "
+                f"Failed: {counts.get('failed', 0)} | "
+                f"Skipped: {counts.get('skipped', 0)}"
             )
 
             total_blocks = data.get("total_blocks", 0)
@@ -322,24 +336,54 @@ class EventEmitter:
             if files_created:
                 self._write()
                 self._write(f"  Project built: {len(files_created)} files created")
-                self._write(f'  Location: {data.get("project_dir")}/')
+                self._write(f"  Location: {data.get('project_dir')}/")
                 if build_result.get("entrypoint"):
-                    self._write(f'  Entrypoint: {build_result["entrypoint"]}')
+                    self._write(f"  Entrypoint: {build_result['entrypoint']}")
                 if build_result.get("requirements"):
-                    self._write(f'  Requirements: {build_result["requirements"]}')
+                    self._write(f"  Requirements: {build_result['requirements']}")
                 if not self.summary_only:
                     self._write()
                     self._write("  Project structure:")
                     for dir_name, dir_path in build_result.get("structure", {}).items():
                         self._write(f"    {dir_name}/")
                         dir_files = [
-                            path for path in files_created
-                            if path.startswith(dir_path)
+                            path for path in files_created if path.startswith(dir_path)
                         ]
                         for path in dir_files:
                             self._write(f"      - {path.rsplit('/', 1)[-1]}")
 
             if data.get("results_file"):
                 self._write()
-                self._write(f'  Results saved to: {data["results_file"]}')
+                self._write(f"  Results saved to: {data['results_file']}")
+            return
+
+        if event_type == EventType.ORCHESTRATION_STUCK:
+            phase = data.get("phase", "unknown")
+            idle_secs = data.get("idle_seconds", 0)
+            self._write(
+                f"  [OrchHeal] STUCK — orchestrator idle for {idle_secs:.0f}s "
+                f"in phase {phase}"
+            )
+            return
+
+        if event_type == EventType.ORCHESTRATION_HEAL_STARTED:
+            heal_type = data.get("heal_type", "unknown")
+            attempt = data.get("attempt", "?")
+            max_attempts = data.get("max_attempts", "?")
+            agent = data.get("agent", "?")
+            self._write(
+                f"  [OrchHeal] Healing attempt {attempt}/{max_attempts} "
+                f"(type={heal_type}, agent={agent})"
+            )
+            return
+
+        if event_type == EventType.ORCHESTRATION_HEAL_APPLIED:
+            heal_type = data.get("heal_type", "unknown")
+            summary = data.get("summary", "")
+            self._write(f"  [OrchHeal] Heal applied ({heal_type}): {summary}")
+            return
+
+        if event_type == EventType.ORCHESTRATION_HEAL_FAILED:
+            reason = data.get("reason", "unknown")
+            self._write(f"  [OrchHeal] Heal failed: {reason}")
             return

@@ -42,8 +42,33 @@ function App() {
   useEffect(() => {
     fetchSessions();
     const interval = setInterval(fetchSessions, 5000);
+    
+    // Check for running session in localStorage
+    const savedSessionId = localStorage.getItem('runningSessionId');
+    if (savedSessionId) {
+      restoreRunningSession(savedSessionId);
+    }
+    
     return () => clearInterval(interval);
   }, []);
+  
+  const restoreRunningSession = async (sessionId) => {
+    try {
+      const statusRes = await fetch(`${API_BASE}/status/${sessionId}`);
+      if (statusRes.ok) {
+        const statusData = await statusRes.json();
+        if (statusData.status === 'running') {
+          setRunningSession(statusData);
+          setActiveTab('status');
+          pollStatus(sessionId);
+        } else {
+          localStorage.removeItem('runningSessionId');
+        }
+      }
+    } catch (error) {
+      console.error('Failed to restore running session:', error);
+    }
+  };
 
   const fetchSessions = async () => {
     try {
@@ -70,6 +95,9 @@ function App() {
       setRunningSession(data);
       setActiveTab('status');
       
+      // Save session ID to localStorage
+      localStorage.setItem('runningSessionId', data.session_id);
+      
       // Poll for status
       pollStatus(data.session_id);
     } catch (error) {
@@ -93,10 +121,23 @@ function App() {
           } else {
             setRunningSession(statusData);
           }
+          
+          // Also try to fetch checkpoint for live file updates
+          try {
+            const checkpointRes = await fetch(`${API_BASE}/checkpoint/${sessionId}`);
+            if (checkpointRes.ok) {
+              const checkpointData = await checkpointRes.json();
+              setRunningSession(prev => ({ ...prev, checkpoint: checkpointData }));
+            }
+          } catch (e) {
+            // Checkpoint endpoint might not exist, ignore
+          }
+          
           setTimeout(poll, 2000);
         } else {
           setRunningSession(statusData);
           fetchSessions();
+          localStorage.removeItem('runningSessionId');
         }
       } catch (error) {
         console.error('Failed to poll status:', error);
@@ -224,9 +265,128 @@ function App() {
                 <p className="task">{runningSession.task || runningSession.result?.goal_analysis?.original_goal}</p>
                 
                 {runningSession.status === 'running' && (
-                  <div className="loading">
-                    <div className="spinner"></div>
-                    <p>{currentPlan ? 'Executing orchestration plan below.' : 'Generating execution plan...'}</p>
+                  <div className="live-activity">
+                    <h3>Live Agent Activity</h3>
+                    
+                    {(() => {
+                      const events = runningSession.events || [];
+                      const lastTaskStarted = [...events].reverse().find(e => e.type === 'task_started');
+                      const lastTaskCompleted = [...events].reverse().find(e => e.type === 'task_completed');
+                      const lastPhaseStarted = [...events].reverse().find(e => e.type === 'phase_started');
+                      const currentPhase = lastPhaseStarted?.data;
+                      
+                      return (
+                        <>
+                          <div className="current-status">
+                            {lastTaskStarted && !lastTaskCompleted && (
+                              <div className="status-running">
+                                <div className="spinner-small"></div>
+                                <span><strong>{lastTaskStarted.data?.agent?.toUpperCase()}</strong> is working on: <em>{lastTaskStarted.data?.title}</em></span>
+                              </div>
+                            )}
+                            {lastTaskCompleted && !lastTaskStarted && (
+                              <div className="status-waiting">
+                                <span>⏳ Waiting for next task...</span>
+                              </div>
+                            )}
+                            {currentPhase && (
+                              <div className="phase-info">
+                                Phase {currentPhase.phase}/{currentPhase.total_phases} — {currentPhase.mode?.toUpperCase()} mode
+                              </div>
+                            )}
+                          </div>
+                          
+                          <div className="activity-feed">
+                            {events.slice(-12).map((event, idx) => {
+                              const isNew = idx === events.length - 1;
+                              return (
+                                <div key={idx} className={`activity-item ${event.type} ${isNew ? 'new' : ''}`}>
+                                  <span className="activity-icon">
+                                    {event.type === 'task_started' && '⚡'}
+                                    {event.type === 'task_completed' && '✅'}
+                                    {event.type === 'task_failed' && '❌'}
+                                    {event.type === 'phase_started' && '🚀'}
+                                    {event.type === 'phase_completed' && '📦'}
+                                    {event.type === 'info' && '💬'}
+                                    {event.type === 'warning' && '⚠️'}
+                                    {event.type === 'plan_created' && '📝'}
+                                    {event.type === 'plan_review_completed' && '🔍'}
+                                    {event.type === 'plan_approved' && '👍'}
+                                    {event.type === 'run_started' && '▶️'}
+                                    {!['task_started', 'task_completed', 'task_failed', 'phase_started', 'phase_completed', 'info', 'warning', 'plan_created', 'plan_review_completed', 'plan_approved', 'run_started'].includes(event.type) && '📋'}
+                                  </span>
+                                  <span className="activity-content">
+                                    {event.type === 'task_started' && (
+                                      <span>
+                                        <strong>{event.data?.agent?.toUpperCase()}</strong> → {event.data?.title}
+                                      </span>
+                                    )}
+                                    {event.type === 'task_completed' && (
+                                      <span>
+                                        <strong>{event.data?.agent?.toUpperCase()}</strong> ✅ {event.data?.execution_time?.toFixed(1)}s
+                                        {event.data?.summary && <span className="task-summary-text"> — {event.data.summary.slice(0, 60)}{event.data.summary?.length > 60 ? '...' : ''}</span>}
+                                      </span>
+                                    )}
+                                    {event.type === 'task_failed' && (
+                                      <span>
+                                        <strong>{event.data?.agent?.toUpperCase()}</strong> ❌ {event.data?.error?.slice(0, 50)}
+                                      </span>
+                                    )}
+                                    {event.type === 'phase_started' && (
+                                      <span>🚀 Phase {event.data?.phase}/{event.data?.total_phases}: {event.data?.task_ids?.join(', ')}</span>
+                                    )}
+                                    {event.type === 'phase_completed' && (
+                                      <span>📦 Phase {event.data?.phase} done</span>
+                                    )}
+                                    {event.type === 'info' && (
+                                      <span>{event.data?.message}</span>
+                                    )}
+                                    {event.type === 'warning' && (
+                                      <span className="warning-text">⚠️ {event.data?.message}</span>
+                                    )}
+                                    {event.type === 'plan_created' && (
+                                      <span>📝 Plan: {event.data?.task_count} tasks, {event.data?.phase_count} phases</span>
+                                    )}
+                                    {event.type === 'plan_review_completed' && (
+                                      <span>🔍 Review {event.data?.iteration}: {event.data?.approval ? 'Approved' : 'Rejected'} ({event.data?.confidence})</span>
+                                    )}
+                                    {event.type === 'plan_approved' && (
+                                      <span>👍 Plan approved</span>
+                                    )}
+                                    {!['task_started', 'task_completed', 'task_failed', 'phase_started', 'phase_completed', 'info', 'warning', 'plan_created', 'plan_review_completed', 'plan_approved', 'run_started'].includes(event.type) && (
+                                      <span>{JSON.stringify(event.data)?.slice(0, 80)}</span>
+                                    )}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </>
+                      );
+                    })()}
+                    
+                    {runningSession.checkpoint?.tasks && Object.keys(runningSession.checkpoint.tasks).length > 0 && (
+                      <div className="generated-files">
+                        <h4>Files Generated</h4>
+                        <div className="project-location">
+                          📁 Project: <code>project/{runningSession.session_id}/</code>
+                        </div>
+                        <div className="files-list">
+                          {Object.values(runningSession.checkpoint.tasks)
+                            .filter(t => t.status === 'success' && t.result?.files_created?.length > 0)
+                            .map(task => (
+                              <div key={task.id} className="task-files">
+                                <strong>{task.id}:</strong>
+                                <div className="file-items">
+                                  {task.result.files_created.map((file, i) => (
+                                    <span key={i} className="file-badge">{file}</span>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -403,25 +563,100 @@ function App() {
               
               {selectedSession.result && (
                 <>
-                  <div className="result-section">
-                    <h3>Project Directory</h3>
-                    <code>{selectedSession.result.project_dir}</code>
-                  </div>
+                  {selectedSession.result.summary && (
+                    <div className="result-section">
+                      <h3>Task Summary</h3>
+                      <div className="task-summary">
+                        <p>Total: {selectedSession.result.summary.total} | Completed: {selectedSession.result.summary.counts?.success || 0} | Failed: {selectedSession.result.summary.counts?.failed || 0}</p>
+                        <div className="tasks-list">
+                          {selectedSession.result.summary.tasks?.map((task) => (
+                            <div key={task.id} className={`task-item ${task.status}`}>
+                              <span className="task-id">{task.id}</span>
+                              <span className="task-title">{task.title}</span>
+                              <span className="task-agent">{task.agent}</span>
+                              <span className={`task-status ${task.status}`}>
+                                {task.status === 'success' ? '✓' : task.status === 'failed' ? '✗' : task.status === 'running' ? '⟳' : '○'}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   
-                  <div className="result-section">
-                    <h3>Build Result</h3>
-                    <pre>{JSON.stringify(selectedSession.result.build_result, null, 2)}</pre>
-                  </div>
+                  {selectedSession.result.summary?.counts?.success > 0 && (
+                    <div className="result-section">
+                      <h3>Generated Files</h3>
+                      <div className="project-location">
+                        📁 Project Location: <code>flask_api/project/{selectedSession.session_id}/</code>
+                      </div>
+                    </div>
+                  )}
                   
-                  <div className="result-section">
-                    <h3>Validation</h3>
-                    <pre>{JSON.stringify(selectedSession.result.validation_result, null, 2)}</pre>
-                  </div>
+                  {selectedSession.result.goal_analysis && (
+                    <div className="result-section">
+                      <h3>Goal Analysis</h3>
+                      <pre>{JSON.stringify(selectedSession.result.goal_analysis, null, 2)}</pre>
+                    </div>
+                  )}
                   
-                  <div className="result-section">
-                    <h3>Runtime</h3>
-                    <pre>{JSON.stringify(selectedSession.result.runtime_result, null, 2)}</pre>
-                  </div>
+                  {selectedSession.result.project_build && Object.keys(selectedSession.result.project_build).length > 0 && (
+                    <div className="result-section">
+                      <h3>Project Build</h3>
+                      <pre>{JSON.stringify(selectedSession.result.project_build, null, 2)}</pre>
+                    </div>
+                  )}
+                  
+                  {selectedSession.result.validation && Object.keys(selectedSession.result.validation).length > 0 && (
+                    <div className="result-section">
+                      <h3>Validation</h3>
+                      <pre>{JSON.stringify(selectedSession.result.validation, null, 2)}</pre>
+                    </div>
+                  )}
+                  
+                  {selectedSession.result.runtime && Object.keys(selectedSession.result.runtime).length > 0 && (
+                    <div className="result-section">
+                      <h3>Runtime</h3>
+                      <pre>{JSON.stringify(selectedSession.result.runtime, null, 2)}</pre>
+                    </div>
+                  )}
+                  
+                  {selectedSession.result.evaluation && Object.keys(selectedSession.result.evaluation).length > 0 && (
+                    <div className="result-section">
+                      <h3>Evaluation</h3>
+                      <pre>{JSON.stringify(selectedSession.result.evaluation, null, 2)}</pre>
+                    </div>
+                  )}
+                  
+                  {selectedSession.result.final_review && (
+                    <div className="result-section">
+                      <h3>Final Review</h3>
+                      <pre>{JSON.stringify(selectedSession.result.final_review, null, 2)}</pre>
+                    </div>
+                  )}
+                  
+                  {selectedSession.result.planning_trace && (
+                    <div className="result-section">
+                      <h3>Planning Trace</h3>
+                      <pre>{JSON.stringify(selectedSession.result.planning_trace, null, 2)}</pre>
+                    </div>
+                  )}
+                  
+                  {selectedSession.events && selectedSession.events.length > 0 && (
+                    <div className="result-section">
+                      <h3>Events ({selectedSession.events.length})</h3>
+                      <div className="events-list">
+                        {selectedSession.events.slice(-20).map((event, idx) => (
+                          <div key={idx} className="event-item">
+                            <span className="event-type">{event.type}</span>
+                            <span className="event-data">
+                              {JSON.stringify(event.data)?.slice(0, 100)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </>
               )}
             </div>

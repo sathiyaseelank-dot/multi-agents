@@ -8,6 +8,12 @@ echo "  Multi-Agent Orchestrator Web UI"
 echo "==================================="
 echo ""
 
+# Activate virtual environment if it exists
+if [ -d "venv" ]; then
+    echo "Activating virtual environment..."
+    source venv/bin/activate
+fi
+
 # Check if Flask API dependencies are installed
 if ! python3 -c "import flask_cors" 2>/dev/null; then
     echo "Installing Flask API dependencies..."

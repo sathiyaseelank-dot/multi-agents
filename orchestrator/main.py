@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from orchestrator.logger import setup_logging
 from orchestrator.orchestrator import Orchestrator
+from orchestrator.self_heal_runner import SelfHealRunner
+from orchestrator.orchestration_healer import OrchestrationHealer
 from __version__ import VERSION_DESCRIPTION
 
 
@@ -25,6 +27,11 @@ Examples:
   python main.py --file task.txt
   python main.py "Build a REST API" --verbose
   python main.py "Build a login system" --dry-run
+  python main.py "Build a REST API" --self-heal
+  python main.py "Build a REST API" --self-heal --max-repairs 3
+  python main.py --heal-project project/20260327-123456
+  python main.py "Build a REST API" --orchestration-heal
+  python main.py "Build a REST API" --orchestration-heal --health-timeout 120 --max-orch-heals 5
         """,
     )
     parser.add_argument(
@@ -33,11 +40,13 @@ Examples:
         help="Task description (e.g., 'Build a login system')",
     )
     parser.add_argument(
-        "--file", "-f",
+        "--file",
+        "-f",
         help="Read task description from a file",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Enable verbose (DEBUG) logging",
     )
@@ -82,6 +91,45 @@ Examples:
         help="Show execution plan without calling any agents (no API calls)",
     )
     parser.add_argument(
+        "--heal-project",
+        metavar="PROJECT_DIR",
+        help="Heal an existing project directory (validates, runs, repairs via Kilo)",
+    )
+
+    # Orchestration-heal group (mutually exclusive with --self-heal)
+    orch_group = parser.add_mutually_exclusive_group()
+    orch_group.add_argument(
+        "--self-heal",
+        action="store_true",
+        help="Enable self-healing: automatically report errors to Kilo and retry",
+    )
+    orch_group.add_argument(
+        "--orchestration-heal",
+        action="store_true",
+        help="Enable orchestration healing: monitor orchestrator process for hangs "
+        "and auto-repair via multi-AI fallback (Kilo/OpenCode/Gemini). "
+        "Mutually exclusive with --self-heal.",
+    )
+
+    parser.add_argument(
+        "--max-repairs",
+        type=int,
+        default=5,
+        help="Maximum self-heal repair attempts (default: 5)",
+    )
+    parser.add_argument(
+        "--health-timeout",
+        type=float,
+        default=60.0,
+        help="Seconds of no output before orchestrator is considered stuck (default: 60)",
+    )
+    parser.add_argument(
+        "--max-orch-heals",
+        type=int,
+        default=3,
+        help="Maximum orchestration heal attempts (default: 3)",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=VERSION_DESCRIPTION,
@@ -115,7 +163,11 @@ def list_sessions(memory_dir: str) -> None:
             results_file = mem_path / f"results-{sid}.json"
             checkpoint_file = mem_path / f"checkpoint-{sid}.json"
             status = "completed" if results_file.exists() else "incomplete"
-            resumable = " (resumable)" if checkpoint_file.exists() and status == "incomplete" else ""
+            resumable = (
+                " (resumable)"
+                if checkpoint_file.exists() and status == "incomplete"
+                else ""
+            )
 
             print(f"    {sid}  {ts}  [{status}{resumable}]")
             print(f"      {epic} ({task_count} tasks)")
@@ -140,7 +192,10 @@ def get_task_description(args) -> str:
     if not sys.stdin.isatty():
         return sys.stdin.read().strip()
 
-    print("Error: No task provided. Usage: python main.py \"Your task here\"", file=sys.stderr)
+    print(
+        'Error: No task provided. Usage: python main.py "Your task here"',
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 
@@ -153,8 +208,107 @@ async def main():
         list_sessions(args.memory_dir)
         return
 
+    # Heal an existing project directory
+    if args.heal_project:
+        runner = SelfHealRunner(
+            max_repair_attempts=args.max_repairs,
+            memory_dir=args.memory_dir,
+            log_dir=args.log_dir,
+        )
+        heal_result = await runner.heal_project(
+            args.heal_project,
+            phase="both",
+        )
+        if args.json:
+            print(json.dumps(heal_result, indent=2))
+        elif heal_result.get("success"):
+            print("\n  Status: HEALED")
+            print(f"  Attempts: {heal_result.get('total_attempts', 0)}")
+            print(f"  Repairs: {len(heal_result.get('repairs_applied', []))}")
+        else:
+            print("\n  Status: HEAL FAILED")
+            print(f"  Error: {heal_result.get('final_error', 'Unknown')}")
+            sys.exit(1)
+        return
+
     task_description = "" if args.resume else get_task_description(args)
 
+    # Self-healing mode
+    if args.self_heal and not args.resume and not args.plan_only and not args.dry_run:
+        runner = SelfHealRunner(
+            max_repair_attempts=args.max_repairs,
+            memory_dir=args.memory_dir,
+            log_dir=args.log_dir,
+        )
+
+        def _make_orchestrator():
+            return Orchestrator(
+                log_dir=args.log_dir,
+                memory_dir=args.memory_dir,
+                output_dir=args.output_dir,
+            )
+
+        result = await runner.heal_and_run(
+            task_description,
+            orchestrator_factory=_make_orchestrator,
+        )
+
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        elif result["status"] == "failed":
+            print("\n  Status: FAILED")
+            print(f"  Error: {result.get('error', 'Unknown')}")
+            heal = result.get("_self_heal", {})
+            if heal.get("repairs_applied"):
+                print(f"  Repairs attempted: {len(heal['repairs_applied'])}")
+            sys.exit(1)
+        else:
+            print(f"\n  Status: {result['status'].upper()}")
+            print(f"  Session: {result['session_id']}")
+            if result.get("project_dir"):
+                print(f"  Project: {result['project_dir']}")
+            heal = result.get("_self_heal", {})
+            if heal.get("repairs_applied"):
+                print(f"  Self-heal repairs: {len(heal['repairs_applied'])}")
+        return
+
+    # Orchestration-healing mode (monitor orchestrator subprocess for hangs)
+    if (
+        args.orchestration_heal
+        and not args.resume
+        and not args.plan_only
+        and not args.dry_run
+    ):
+        healer = OrchestrationHealer(
+            task=task_description,
+            health_timeout=args.health_timeout,
+            max_heals=args.max_orch_heals,
+            log_dir=args.log_dir,
+            memory_dir=args.memory_dir,
+            output_dir=args.output_dir,
+        )
+
+        result = await healer.run()
+
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        elif result.get("status") == "completed":
+            print("\n  Status: COMPLETED")
+            heal_meta = result.get("_orch_heal", {})
+            if heal_meta.get("heal_count"):
+                print(f"  Orchestration heals applied: {heal_meta['heal_count']}")
+            if heal_meta.get("restart_count"):
+                print(f"  Restarts: {heal_meta['restart_count']}")
+        else:
+            print(f"\n  Status: {result.get('status', 'UNKNOWN').upper()}")
+            print(f"  Error: {result.get('error', 'Unknown')}")
+            heal_meta = result.get("_orch_heal", {})
+            if heal_meta.get("heal_count"):
+                print(f"  Orchestration heals attempted: {heal_meta['heal_count']}")
+            sys.exit(1)
+        return
+
+    # Standard mode (no self-heal)
     orchestrator = Orchestrator(
         log_dir=args.log_dir,
         memory_dir=args.memory_dir,
@@ -175,7 +329,7 @@ async def main():
     if args.json:
         print(json.dumps(result, indent=2))
     elif result["status"] == "failed":
-        print(f"\n  Status: FAILED")
+        print("\n  Status: FAILED")
         print(f"  Error: {result.get('error', 'Unknown')}")
         sys.exit(1)
     else:
@@ -184,10 +338,14 @@ async def main():
         if result.get("project_dir"):
             print(f"  Project: {result['project_dir']}")
         if result.get("validation_result"):
-            validation_status = "passed" if result["validation_result"].get("success") else "failed"
+            validation_status = (
+                "passed" if result["validation_result"].get("success") else "failed"
+            )
             print(f"  Validation: {validation_status}")
         if result.get("runtime_result"):
-            runtime_status = "passed" if result["runtime_result"].get("success") else "failed"
+            runtime_status = (
+                "passed" if result["runtime_result"].get("success") else "failed"
+            )
             print(f"  Runtime: {runtime_status}")
 
 

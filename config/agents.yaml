@@ -307,3 +307,35 @@ capabilities:
     - integration_test_generation
     - test_coverage_analysis
     - test_documentation
+
+# Orchestration Healer Configuration
+# Used when the orchestrator process hangs and needs repair
+orchestration_healer:
+  # Health check settings
+  health_timeout_seconds: 60
+  max_heals: 3
+
+  # Repair agent fallback chain — tried in order
+  repair_agent_chain:
+    - kilo
+    - opencode
+    - gemini
+
+  # Phase-to-file mapping for targeted code repairs
+  phase_files:
+    EXECUTING:
+      - orchestrator/runtime_executor.py
+      - orchestrator/task_router.py
+      - orchestrator/orchestrator.py
+    PLANNING:
+      - orchestrator/orchestrator.py
+      - orchestrator/goal_analyzer.py
+    BUILDING:
+      - orchestrator/project_builder.py
+      - orchestrator/orchestrator.py
+    VALIDATING:
+      - orchestrator/validation_engine.py
+      - orchestrator/orchestrator.py
+    RUNNING:
+      - orchestrator/runtime_executor.py
+      - orchestrator/orchestrator.py

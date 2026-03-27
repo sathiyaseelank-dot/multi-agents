@@ -485,3 +485,23 @@ def health_check():
             "timestamp": datetime.now().isoformat(),
         }
     )
+
+
+@bp.route("/checkpoint/<session_id>", methods=["GET"])
+def get_checkpoint(session_id):
+    """Get current checkpoint for a running session.
+
+    Returns task progress and any files generated so far.
+    """
+    memory_dir = Path(__file__).parent.parent.parent / "memory"
+    checkpoint_file = memory_dir / f"checkpoint-{session_id}.json"
+
+    if checkpoint_file.exists():
+        try:
+            with open(checkpoint_file) as f:
+                checkpoint = json.load(f)
+            return jsonify(checkpoint)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    return jsonify({"tasks": {}, "session_id": session_id})
