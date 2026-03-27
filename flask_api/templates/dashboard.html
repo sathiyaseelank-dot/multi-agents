@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analytics Dashboard</title>
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="dashboard-container">
+        <header class="dashboard-header">
+            <h1>Analytics Dashboard</h1>
+            <div class="header-actions">
+                <select id="period-filter" class="filter-select">
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                </select>
+                <button id="refresh-btn" class="btn btn-primary">Refresh</button>
+            </div>
+        </header>
+
+        <div id="loading-overlay" class="loading-overlay hidden">
+            <div class="spinner"></div>
+            <p>Loading analytics...</p>
+        </div>
+
+        <div id="error-message" class="error-message hidden"></div>
+
+        <section class="metrics-grid" id="metrics-container">
+            <div class="metric-card" data-metric="users">
+                <div class="metric-icon">👥</div>
+                <div class="metric-content">
+                    <h3 class="metric-label">Total Users</h3>
+                    <p class="metric-value" id="metric-users-value">-</p>
+                    <span class="metric-change" id="metric-users-change"></span>
+                </div>
+            </div>
+            <div class="metric-card" data-metric="messages">
+                <div class="metric-icon">💬</div>
+                <div class="metric-content">
+                    <h3 class="metric-label">Total Messages</h3>
+                    <p class="metric-value" id="metric-messages-value">-</p>
+                    <span class="metric-change" id="metric-messages-change"></span>
+                </div>
+            </div>
+            <div class="metric-card" data-metric="conversations">
+                <div class="metric-icon">💭</div>
+                <div class="metric-content">
+                    <h3 class="metric-label">Total Conversations</h3>
+                    <p class="metric-value" id="metric-conversations-value">-</p>
+                    <span class="metric-change" id="metric-conversations-change"></span>
+                </div>
+            </div>
+            <div class="metric-card" data-metric="active-users">
+                <div class="metric-icon">🔥</div>
+                <div class="metric-content">
+                    <h3 class="metric-label">Active Users</h3>
+                    <p class="metric-value" id="metric-active-users-value">-</p>
+                    <span class="metric-change" id="metric-active-users-change"></span>
+                </div>
+            </div>
+        </section>
+
+        <section class="charts-grid">
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h2>Messages Over Time</h2>
+                    <select class="days-filter" data-chart="messages_per_day">
+                        <option value="7">7 days</option>
+                        <option value="14">14 days</option>
+                        <option value="30">30 days</option>
+                    </select>
+                </div>
+                <div class="chart-container">
+                    <canvas id="messages-chart"></canvas>
+                </div>
+            </div>
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h2>Users Over Time</h2>
+                    <select class="days-filter" data-chart="users_per_day">
+                        <option value="7">7 days</option>
+                        <option value="14">14 days</option>
+                        <option value="30">30 days</option>
+                    </select>
+                </div>
+                <div class="chart-container">
+                    <canvas id="users-chart"></canvas>
+                </div>
+            </div>
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h2>Conversations Over Time</h2>
+                    <select class="days-filter" data-chart="conversations_per_day">
+                        <option value="7">7 days</option>
+                        <option value="14">14 days</option>
+                        <option value="30">30 days</option>
+                    </select>
+                </div>
+                <div class="chart-container">
+                    <canvas id="conversations-chart"></canvas>
+                </div>
+            </div>
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h2>Messages by Hour</h2>
+                    <select class="days-filter" data-chart="messages_by_hour">
+                        <option value="7">7 days</option>
+                        <option value="14">14 days</option>
+                        <option value="30">30 days</option>
+                    </select>
+                </div>
+                <div class="chart-container">
+                    <canvas id="hourly-chart"></canvas>
+                </div>
+            </div>
+            <div class="chart-card chart-wide">
+                <div class="chart-header">
+                    <h2>Message Types</h2>
+                </div>
+                <div class="chart-container">
+                    <canvas id="types-chart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <section class="top-lists">
+            <div class="top-list-card">
+                <h2>Top Active Users</h2>
+                <div class="table-container">
+                    <table id="top-users-table">
+                        <thead>
+                            <tr>
+                                <th>Username</th>
+                                <th>Email</th>
+                                <th>Messages</th>
+                                <th>Last Activity</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr><td colspan="4" class="loading-cell">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="top-list-card">
+                <h2>Top Conversations</h2>
+                <div class="table-container">
+                    <table id="top-conversations-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                                <th>Participants</th>
+                                <th>Messages</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr><td colspan="4" class="loading-cell">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

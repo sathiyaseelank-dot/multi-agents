@@ -884,15 +884,22 @@ class Orchestrator:
         try:
             agent = self._get_agent(agent_name)
         except ValueError:
+            task.error = f"Unknown agent: {agent_name}"
             return None
 
         if not agent.is_available():
+            task.error = f"{agent_name} CLI not found in PATH"
             return None
 
         context = self.context.build_context(task.dependencies)
         prompt = agent.build_prompt(task.description, context=context)
         result = await agent.execute(prompt)
-        if result.status != "success" or not result.parsed_output:
+        if result.status != "success":
+            task.error = result.error or f"{agent_name} returned status {result.status}"
+            return None
+
+        if not result.parsed_output:
+            task.error = f"{agent_name} returned no structured output"
             return None
 
         candidate = {
@@ -977,7 +984,7 @@ class Orchestrator:
 
         self.task_manager.fail_task(
             task.id,
-            error="Unknown error",
+            error=task.error or "Unknown error",
             execution_time=0.0,
         )
         self.events.emit(
@@ -987,7 +994,7 @@ class Orchestrator:
                 "title": task.title,
                 "agent": task.agent,
                 "execution_time": 0.0,
-                "error": "Unknown error",
+                "error": task.error or "Unknown error",
             },
         )
         return False

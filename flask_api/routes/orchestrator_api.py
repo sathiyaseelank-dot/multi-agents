@@ -39,7 +39,7 @@ class SessionEventEmitter(EventEmitter):
     def __init__(self, session_id: str, **kwargs):
         super().__init__(session_id=session_id, **kwargs)
         self.events_list = []
-        self.status = "pending"
+        self.status = "starting"
         self.result = None
     
     def emit(self, event_type: EventType | str, data: dict | None = None):
@@ -68,6 +68,8 @@ def run_orchestrator_async(task_description: str, session_id: str, memory_dir: s
     
     async def run():
         emitter = SessionEventEmitter(session_id)
+        if session_id in running_sessions:
+            running_sessions[session_id]["emitter"] = emitter
         orchestrator = Orchestrator(
             memory_dir=memory_dir,
             events=emitter,
@@ -180,12 +182,14 @@ def get_status(session_id):
     # Check running sessions
     if session_id in running_sessions:
         session = running_sessions[session_id]
+        emitter = session.get("emitter")
+        status = getattr(emitter, "status", session.get("status", "starting"))
         return jsonify({
             "session_id": session_id,
-            "status": "running",
+            "status": "running" if status in {"pending", "starting"} else status,
             "task": session.get("task"),
             "started_at": session.get("started_at"),
-            "events": [],  # Events available when completed
+            "events": emitter.events_list if emitter else [],
         })
     
     return jsonify({"error": "Session not found"}), 404
