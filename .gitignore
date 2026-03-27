@@ -77,6 +77,9 @@ output/
 .DS_Store
 Thumbs.db
 
+# Frontend dependencies
+frontend/node_modules/
+
 # Flask API specific
 flask_api/*.db
 flask_api/instance/
