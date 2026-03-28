@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from orchestrator.task_router import (
+    build_phase_payloads,
     compute_phases,
     get_fallback_agent,
     compute_execution_summary,
@@ -90,6 +91,7 @@ class TestComputePhases:
         
         assert len(phases) == 1
         assert len(phases[0]) == 3  # All can run in parallel
+        assert [task.id for task in phases[0]] == ["task-001", "task-002", "task-003"]
 
     def test_sequential_dependencies(self):
         """Test tasks with sequential dependencies."""
@@ -206,6 +208,15 @@ class TestGetFallbackAgent:
                 fallback = get_fallback_agent(agent, task_type)
                 assert fallback is not None
 
+    def test_fallback_skips_excluded_agents(self):
+        """Disabled agents should never be selected as fallbacks."""
+        fallback = get_fallback_agent(
+            "gemini",
+            "frontend",
+            excluded_agents={"opencode"},
+        )
+        assert fallback is None
+
 
 class TestComputeExecutionSummary:
     """Tests for compute_execution_summary function."""
@@ -258,6 +269,31 @@ class TestComputeExecutionSummary:
         assert "opencode" in summary
         assert "gemini" in summary
         assert "kilo" in summary
+
+
+class TestBuildPhasePayloads:
+    def create_task(self, task_id: str, agent: str = "opencode") -> Task:
+        return Task(
+            id=task_id,
+            title=f"Task {task_id}",
+            description=f"Description for {task_id}",
+            agent=agent,
+            type="backend",
+            dependencies=[],
+        )
+
+    def test_build_phase_payloads_marks_parallelism(self):
+        phases = [
+            [self.create_task("task-001")],
+            [self.create_task("task-002"), self.create_task("task-003", agent="gemini")],
+        ]
+
+        payloads = build_phase_payloads(phases)
+
+        assert payloads[0]["parallel"] is False
+        assert payloads[0]["task_ids"] == ["task-001"]
+        assert payloads[1]["parallel"] is True
+        assert payloads[1]["task_ids"] == ["task-002", "task-003"]
 
     def test_empty_phases(self):
         """Test summary for empty phases."""

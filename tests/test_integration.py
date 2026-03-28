@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agents.base_agent import AgentConfig
+from agents.base_agent import AgentResult
 from agents.planner import PlanReviewerAgent, PlannerAgent
 from agents.backend import BackendAgent
 from agents.frontend import FrontendAgent
@@ -222,6 +223,71 @@ class TestFallbackRouting:
         event_types = [event["type"] for event in orch.events.get_history()]
         assert EventType.AGENT_RETRY.value in event_types
         assert EventType.TASK_FAILED.value in event_types
+
+    def test_deterministic_agent_failure_disables_and_reroutes_future_tasks(self, tmp_path):
+        orch = make_mock_orchestrator(
+            tmp_path,
+            planner_script="mock_codex_gemini_regression.py",
+        )
+
+        class DeterministicFailGemini:
+            def is_available(self):
+                return True
+
+            def build_prompt(self, task_description, context=None):
+                return task_description
+
+            async def execute(self, prompt):
+                return AgentResult(
+                    agent="gemini",
+                    status="error",
+                    error="ModelNotFoundError: Requested entity was not found.",
+                )
+
+        orch._agents["gemini"] = DeterministicFailGemini()
+
+        result = asyncio.run(orch.run("Build with broken gemini config"))
+
+        assert result["status"] == "completed"
+        assert any(item["agent"] == "gemini" for item in result["disabled_agents"])
+        assert result["phases"][1]["task_ids"] == ["task-003"]
+
+        task_003 = orch.task_manager.get_task("task-003")
+        assert task_003 is not None
+        assert task_003.agent == "opencode"
+        assert task_003.status == TaskStatus.SUCCESS
+
+        warning_events = [
+            event for event in orch.events.get_history()
+            if event["type"] == EventType.WARNING.value
+        ]
+        assert any(
+            event["data"].get("kind") == "agent_disabled"
+            and event["data"].get("agent") == "gemini"
+            for event in warning_events
+        )
+        assert any(
+            event["data"].get("kind") == "agent_rerouted"
+            and event["data"].get("task_id") == "task-003"
+            and event["data"].get("fallback_agent") == "opencode"
+            for event in warning_events
+        )
+
+    def test_plan_created_uses_canonical_computed_phases(self, tmp_path):
+        orch = make_mock_orchestrator(
+            tmp_path,
+            planner_script="mock_codex_gemini_regression.py",
+        )
+
+        result = asyncio.run(orch.run("Build with normalized phases"))
+
+        assert result["status"] == "completed"
+        plan_created = next(
+            event for event in orch.events.get_history()
+            if event["type"] == EventType.PLAN_CREATED.value
+        )
+        assert plan_created["data"]["phases"] == result["plan"]["phases"]
+        assert "Phase 1 (parallel): [task-001, task-002]" in plan_created["data"]["execution_summary"]
 
 
 class TestPlanningDebate:

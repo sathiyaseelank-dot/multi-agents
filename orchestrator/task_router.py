@@ -29,6 +29,7 @@ def compute_phases(tasks: list[Task]) -> list[list[Task]]:
     that can run in parallel (all dependencies satisfied by prior phases).
     """
     task_map = {t.id: t for t in tasks}
+    task_order = [t.id for t in tasks]
     remaining = set(t.id for t in tasks)
     completed = set()
     phases = []
@@ -40,7 +41,9 @@ def compute_phases(tasks: list[Task]) -> list[list[Task]]:
 
         # Find tasks whose dependencies are all completed
         ready = []
-        for tid in list(remaining):
+        for tid in task_order:
+            if tid not in remaining:
+                continue
             task = task_map[tid]
             deps = set(task.dependencies)
             if deps.issubset(completed):
@@ -64,13 +67,45 @@ def compute_phases(tasks: list[Task]) -> list[list[Task]]:
     return phases
 
 
-def get_fallback_agent(failed_agent: str, task_type: str) -> Optional[str]:
+def build_phase_payloads(phases: list[list[Task]]) -> list[dict]:
+    """Build canonical, UI-friendly phase metadata from computed phases."""
+    payloads = []
+    for index, phase in enumerate(phases, 1):
+        task_ids = [task.id for task in phase]
+        parallel = len(phase) > 1
+        description = (
+            f"Run {', '.join(task_ids)} in parallel"
+            if parallel
+            else f"Run {task_ids[0]}"
+            if task_ids
+            else "No tasks"
+        )
+        payloads.append(
+            {
+                "phase": index,
+                "description": description,
+                "parallel": parallel,
+                "task_ids": task_ids,
+                "agents": [task.agent for task in phase],
+            }
+        )
+    return payloads
+
+
+def get_fallback_agent(
+    failed_agent: str,
+    task_type: str,
+    excluded_agents: set[str] | None = None,
+) -> Optional[str]:
     """Get a fallback agent when the primary fails.
 
     Returns the best alternative agent name, or None if no fallback available.
     """
+    excluded = excluded_agents or set()
     fallbacks = FALLBACK_MAP.get(failed_agent, [])
     for agent in fallbacks:
+        if agent in excluded:
+            continue
         caps = AGENT_CAPABILITIES.get(agent, set())
         if task_type in caps:
             return agent

@@ -14,7 +14,12 @@ from typing import Optional
 from .events import EventEmitter, EventType
 from .state_machine import State, StateMachine
 from .task_manager import TaskManager, TaskStatus
-from .task_router import compute_phases, get_fallback_agent, compute_execution_summary
+from .task_router import (
+    build_phase_payloads,
+    compute_execution_summary,
+    compute_phases,
+    get_fallback_agent,
+)
 from .context_accumulator import ContextAccumulator
 from .project_builder import build_project
 from .repair_engine import (
@@ -66,13 +71,18 @@ class Orchestrator:
         output_dir: str = "output",
         plan_only: bool = False,
         resume_session_id: Optional[str] = None,
+        session_id: Optional[str] = None,
         summary_only: bool = False,
         events: Optional[EventEmitter] = None,
         enable_learning: bool = True,
     ):
         self.state_machine = StateMachine(on_transition=self._on_state_change)
         self.task_manager = TaskManager(memory_dir=memory_dir)
-        initial_session_id = resume_session_id or datetime.now().strftime("%Y%m%d-%H%M%S")
+        initial_session_id = (
+            resume_session_id
+            or session_id
+            or datetime.now().strftime("%Y%m%d-%H%M%S")
+        )
         self.context = ContextAccumulator(workspace_root=str(Path("project") / initial_session_id))
         self.log_dir = log_dir
         self.memory_dir = memory_dir
@@ -101,6 +111,8 @@ class Orchestrator:
         self._memory_record: dict = {}
         self._original_prompt: str = ""
         self._refined_prompt: str = ""
+        self._disabled_agents: dict[str, str] = {}
+        self._computed_phases: list[list] = []
         self.enable_learning = enable_learning
         self.summary_only = summary_only
         self.events = events or EventEmitter(
@@ -217,10 +229,123 @@ class Orchestrator:
             try:
                 agent = self._get_agent(name)
                 if not agent.is_available():
+                    self._disable_agent_for_session(
+                        name,
+                        f"{name} CLI not found in PATH",
+                        emit_warning=False,
+                    )
                     unavailable.append(name)
-            except Exception:
+            except Exception as exc:
+                self._disable_agent_for_session(
+                    name,
+                    f"Failed to initialize {name}: {exc}",
+                    emit_warning=False,
+                )
                 unavailable.append(name)
         return unavailable
+
+    def _detect_deterministic_agent_failure(self, error: str | None) -> Optional[str]:
+        """Return a disable reason for deterministic agent/config failures."""
+        if not error:
+            return None
+
+        normalized = error.lower()
+        known_failures = (
+            ("modelnotfounderror", "configured model was not found"),
+            ("requested entity was not found", "configured model was not found"),
+            ("invalid model", "configured model is invalid"),
+            ("unknown model", "configured model is invalid"),
+            ("unsupported model", "configured model is unsupported"),
+        )
+        for marker, reason in known_failures:
+            if marker in normalized:
+                return reason
+        return None
+
+    def _disable_agent_for_session(
+        self,
+        agent_name: str,
+        reason: str,
+        emit_warning: bool = True,
+    ) -> bool:
+        """Disable an agent for the current session after a deterministic failure."""
+        if agent_name in self._disabled_agents:
+            return False
+
+        self._disabled_agents[agent_name] = reason
+        logger.warning("Disabling agent %s for session %s: %s", agent_name, self.session_id, reason)
+        if emit_warning:
+            self.events.emit(
+                EventType.WARNING,
+                {
+                    "message": f"Disabled agent {agent_name} for this run",
+                    "detail": reason,
+                    "agent": agent_name,
+                    "kind": "agent_disabled",
+                },
+            )
+        return True
+
+    def _disabled_agent_payloads(self) -> list[dict]:
+        return [
+            {"agent": agent, "reason": reason}
+            for agent, reason in self._disabled_agents.items()
+        ]
+
+    def _reroute_pending_tasks(self) -> None:
+        """Move pending work off agents that are disabled for this session."""
+        if not self._disabled_agents:
+            return
+
+        excluded = set(self._disabled_agents)
+        for task in self.task_manager.tasks.values():
+            if task.status != TaskStatus.PENDING or task.agent not in excluded:
+                continue
+
+            fallback = get_fallback_agent(task.agent, task.type, excluded_agents=excluded)
+            if not fallback:
+                continue
+
+            original_agent = task.agent
+            task.agent = fallback
+            self.events.emit(
+                EventType.WARNING,
+                {
+                    "message": f"Reassigned {task.id} from {original_agent} to {fallback}",
+                    "detail": self._disabled_agents.get(original_agent, ""),
+                    "task_id": task.id,
+                    "original_agent": original_agent,
+                    "fallback_agent": fallback,
+                    "kind": "agent_rerouted",
+                },
+            )
+
+    def _refresh_execution_plan(self) -> list[list]:
+        """Recompute canonical phases and keep persisted plan metadata in sync."""
+        tasks = list(self.task_manager.tasks.values())
+        phases = compute_phases(tasks)
+        self._computed_phases = phases
+
+        if self.plan is not None:
+            task_map = {task.id: task for task in tasks}
+            normalized_tasks = []
+            for item in self.plan.get("tasks", []):
+                task_id = item.get("id")
+                task = task_map.get(task_id)
+                if task is None:
+                    normalized_tasks.append(item)
+                    continue
+                normalized = dict(item)
+                normalized["agent"] = task.agent
+                normalized["dependencies"] = list(task.dependencies)
+                normalized_tasks.append(normalized)
+            self.plan = {
+                **self.plan,
+                "tasks": normalized_tasks,
+                "phases": build_phase_payloads(phases),
+            }
+
+        return phases
 
     async def resume(self) -> dict:
         """Resume a previously interrupted session from checkpoint."""
@@ -271,6 +396,7 @@ class Orchestrator:
                     logger.debug(f"Restored context for completed task {task_id}")
 
         # Report what we're resuming from
+        self._reroute_pending_tasks()
         pending = self.task_manager.get_tasks_by_status(TaskStatus.PENDING)
         completed = self.task_manager.get_tasks_by_status(TaskStatus.SUCCESS)
         self.events.emit(
@@ -283,8 +409,7 @@ class Orchestrator:
             },
         )
 
-        tasks = list(self.task_manager.tasks.values())
-        phases = compute_phases(tasks)
+        phases = self._refresh_execution_plan()
 
         try:
             # Must pass through PLANNING to reach EXECUTING
@@ -375,18 +500,20 @@ class Orchestrator:
             # Load tasks into manager
             self.task_manager.load_from_plan(self.plan)
             self.context.epic = self.plan.get("epic", self._refined_prompt or task_description)
+            self._reroute_pending_tasks()
 
             # Compute and display execution phases from DAG
-            tasks = list(self.task_manager.tasks.values())
-            phases = compute_phases(tasks)
+            phases = self._refresh_execution_plan()
             self.events.emit(
                 EventType.PLAN_CREATED,
                 {
                     "plan": self.plan,
+                    "phases": self.plan.get("phases", []),
                     "epic": self.plan.get("epic", task_description),
                     "task_count": len(self.plan.get("tasks", [])),
                     "phase_count": len(phases),
                     "execution_summary": compute_execution_summary(phases),
+                    "disabled_agents": self._disabled_agent_payloads(),
                 },
             )
 
@@ -775,6 +902,7 @@ class Orchestrator:
     async def _execute_phases(self, phases: list[list]):
         """Execute tasks phase by phase — parallel within each phase."""
         for phase_num, phase_tasks in enumerate(phases, 1):
+            self._reroute_pending_tasks()
             # Skip tasks that are already done (shouldn't happen, but be safe)
             pending = [t for t in phase_tasks if t.status == TaskStatus.PENDING]
             if not pending:
@@ -845,7 +973,11 @@ class Orchestrator:
         """Execute a task, falling back to an alternate agent on failure."""
         success = await self._execute_task(task)
         if success:
-            fallback = get_fallback_agent(task.agent, task.type)
+            fallback = get_fallback_agent(
+                task.agent,
+                task.type,
+                excluded_agents=set(self._disabled_agents),
+            )
             if fallback:
                 await self._execute_candidate(task, fallback, optimize_only=True)
                 best_candidate = self._select_best_candidate(task.id)
@@ -857,7 +989,11 @@ class Orchestrator:
             return
 
         # Try fallback agent
-        fallback = get_fallback_agent(task.agent, task.type)
+        fallback = get_fallback_agent(
+            task.agent,
+            task.type,
+            excluded_agents=set(self._disabled_agents),
+        )
         if fallback:
             logger.info(f"Falling back from {task.agent} to {fallback} for {task.id}")
             self.events.emit(
@@ -889,6 +1025,7 @@ class Orchestrator:
 
         if not agent.is_available():
             task.error = f"{agent_name} CLI not found in PATH"
+            self._disable_agent_for_session(agent_name, task.error)
             return None
 
         context = self.context.build_context(task.dependencies)
@@ -896,6 +1033,12 @@ class Orchestrator:
         result = await agent.execute(prompt)
         if result.status != "success":
             task.error = result.error or f"{agent_name} returned status {result.status}"
+            deterministic_reason = self._detect_deterministic_agent_failure(task.error)
+            if deterministic_reason:
+                self._disable_agent_for_session(
+                    agent_name,
+                    f"{deterministic_reason}: {task.error}",
+                )
             return None
 
         if not result.parsed_output:
@@ -943,6 +1086,7 @@ class Orchestrator:
 
         if not self._get_agent(task.agent).is_available():
             error = f"{task.agent} CLI not found in PATH"
+            self._disable_agent_for_session(task.agent, error)
             self.task_manager.fail_task(task.id, error)
             self.events.emit(
                 EventType.TASK_FAILED,
@@ -1057,6 +1201,8 @@ class Orchestrator:
             return False
 
         self.plan = self._merge_plan(self.plan or {}, result.parsed_output)
+        self._reroute_pending_tasks()
+        self._refresh_execution_plan()
         replan_record = {
             "attempt": attempt,
             "failed_task_ids": [task.id for task in failed_tasks],
@@ -1285,6 +1431,9 @@ class Orchestrator:
             "session_id": self.session_id,
             "timestamp": datetime.now().isoformat(),
             "summary": summary or self.task_manager.summary(),
+            "phases": _safe_serialize(build_phase_payloads(self._computed_phases)),
+            "execution_summary": compute_execution_summary(self._computed_phases),
+            "disabled_agents": _safe_serialize(self._disabled_agent_payloads()),
             "results": {k: _safe_serialize(v) for k, v in (results or self.context.get_all_results()).items()},
             "output_files": self._output_files,
             "goal_analysis": _safe_serialize(self._goal_analysis),
@@ -1313,6 +1462,8 @@ class Orchestrator:
             "session_id": self.session_id,
             "timestamp": datetime.now().isoformat(),
             "plan": plan,
+            "phases": _safe_serialize(plan.get("phases", [])),
+            "disabled_agents": _safe_serialize(self._disabled_agent_payloads()),
             "planning_trace": _safe_serialize(self._planning_trace),
             "review_iterations": self._review_iterations,
             "final_review": _safe_serialize(self._final_review),
@@ -1336,6 +1487,9 @@ class Orchestrator:
                 (s1.value, s2.value) for s1, s2 in self.state_machine.history
             ],
             "project_dir": getattr(self, "_latest_project_dir", None),
+            "phases": _safe_serialize(build_phase_payloads(getattr(self, "_computed_phases", []))),
+            "execution_summary": compute_execution_summary(getattr(self, "_computed_phases", [])),
+            "disabled_agents": _safe_serialize(self._disabled_agent_payloads()),
             "build_result": getattr(self, "_project_build_result", {}),
             "goal_analysis": getattr(self, "_goal_analysis", {}),
             "planning_memories": getattr(self, "_planning_memories", []),
@@ -1615,6 +1769,9 @@ class Orchestrator:
         return {
             "status": status,
             "summary": summary or {"total": 0, "counts": {}},
+            "phases": _safe_serialize(build_phase_payloads(getattr(self, "_computed_phases", []))),
+            "execution_summary": compute_execution_summary(getattr(self, "_computed_phases", [])),
+            "disabled_agents": _safe_serialize(self._disabled_agent_payloads()),
             "tasks": getattr(self, "_latest_task_summaries", []),
             "total_blocks": getattr(self, "_latest_totals", {}).get("blocks", 0),
             "total_lines": getattr(self, "_latest_totals", {}).get("lines", 0),

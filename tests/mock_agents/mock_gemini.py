@@ -2,7 +2,7 @@
 """Mock Gemini frontend agent — returns canned JSX code.
 
 Mimics: gemini -p "<prompt>"
-Supports: MOCK_EXIT_CODE, MOCK_DELAY
+Supports: MOCK_EXIT_CODE, MOCK_DELAY, MOCK_ERROR_TEXT
 """
 
 import os
@@ -11,6 +11,7 @@ import time
 
 exit_code = int(os.environ.get("MOCK_EXIT_CODE", "0"))
 delay = float(os.environ.get("MOCK_DELAY", "0"))
+error_text = os.environ.get("MOCK_ERROR_TEXT", "")
 
 # Gemini CLI uses -p flag for non-interactive mode — consume it if present
 args = sys.argv[1:]
@@ -21,7 +22,10 @@ if delay:
     time.sleep(delay)
 
 if exit_code != 0:
-    print(f"Error: mock failure (MOCK_EXIT_CODE={exit_code})", file=sys.stderr)
+    print(
+        error_text or f"Error: mock failure (MOCK_EXIT_CODE={exit_code})",
+        file=sys.stderr,
+    )
     sys.exit(exit_code)
 
 print("Here is the frontend component:")

@@ -144,7 +144,7 @@ class EventEmitter:
         if event_type == EventType.PLAN_CREATED:
             plan = data.get("plan", {})
             tasks = plan.get("tasks", [])
-            phases = plan.get("phases", [])
+            phases = data.get("phases") or plan.get("phases", [])
             self._write()
             self._write("=" * 60)
             self._write("  EXECUTION PLAN")
@@ -184,6 +184,16 @@ class EventEmitter:
                 self._write()
                 self._write(f'  Computed execution order ({data.get("phase_count", 0)} phases):')
                 self._write(execution_summary)
+
+            disabled_agents = data.get("disabled_agents", [])
+            if disabled_agents:
+                self._write()
+                self._write("  Disabled agents for this run:")
+                self._write("  " + "-" * 56)
+                for item in disabled_agents:
+                    self._write(
+                        f'    {item.get("agent", "?")}: {item.get("reason", "")}'
+                    )
 
             self._write()
             self._write("=" * 60)

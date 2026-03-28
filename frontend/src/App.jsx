@@ -1,201 +1,54 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import './styles.css';
 
 const API_BASE = 'http://localhost:5000/api/orchestrator';
+const PLAN_EVENT_TYPES = ['plan_created', 'plan_revised'];
 
-const EVENT_TYPE_LABELS = {
-  run_started: 'Run started',
-  run_completed: 'Run completed',
-  plan_created: 'Plan ready',
-  phase_started: 'Phase started',
-  phase_completed: 'Phase completed',
-  task_started: 'Task started',
-  task_completed: 'Task completed',
-  task_failed: 'Task failed',
-  agent_retry: 'Retrying with fallback agent',
-  info: 'Info',
-  warning: 'Warning',
-  error: 'Error',
-};
-
-function sortEvents(events = []) {
-  return [...events].sort((a, b) => {
-    if (typeof a.seq === 'number' && typeof b.seq === 'number') {
-      return a.seq - b.seq;
-    }
-    return new Date(a.timestamp) - new Date(b.timestamp);
-  });
+function getLivePlan(session) {
+  if (!session) return null;
+  if (session.plan) return session.plan;
+  if (session.result?.plan) return session.result.plan;
+  if (session.result?.planning_trace?.revised_plan) return session.result.planning_trace.revised_plan;
+  if (session.result?.planning_trace?.initial_plan) return session.result.planning_trace.initial_plan;
+  if (session.planning_trace?.revised_plan) return session.planning_trace.revised_plan;
+  if (session.planning_trace?.initial_plan) return session.planning_trace.initial_plan;
+  const latestPlanEvent = [...(session.events || [])]
+    .reverse()
+    .find((event) => PLAN_EVENT_TYPES.includes(event.type) && event.data?.plan);
+  return latestPlanEvent?.data?.plan || null;
 }
 
-function toSentenceCase(value) {
-  if (!value) return '';
-  return value.charAt(0).toUpperCase() + value.slice(1);
+function getPlanningTrace(session) {
+  return session?.result?.planning_trace || session?.planning_trace || null;
 }
 
-function formatEventSummary(event) {
-  const data = event?.data || {};
-
-  switch (event?.type) {
-    case 'run_started':
-      return data.task || 'Starting orchestration';
-    case 'plan_created':
-      return data.execution_summary || `${data.phase_count || 0} phases planned`;
-    case 'phase_started':
-      return `Phase ${data.phase}/${data.total_phases} (${data.mode || 'sequential'}) with ${data.task_count || 0} task(s)`;
-    case 'phase_completed':
-      return `Phase ${data.phase}/${data.total_phases} finished`;
-    case 'task_started':
-      return `${data.task_id}: ${data.title}${data.agent ? ` via ${data.agent}` : ''}`;
-    case 'task_completed':
-      return `${data.task_id}: ${data.summary || data.title || 'Completed'}`;
-    case 'task_failed':
-      return `${data.task_id}: ${data.error || 'Failed'}`;
-    case 'agent_retry':
-      return `${data.task_id}: ${data.original_agent} -> ${data.fallback_agent}`;
-    case 'info':
-    case 'warning':
-    case 'error':
-      return data.message || data.detail || 'No details';
-    default:
-      return JSON.stringify(data);
-  }
+function getLiveSummary(session) {
+  return session?.result?.summary || session?.summary || null;
 }
 
-function buildExecutionView(events = []) {
-  const sorted = sortEvents(events);
-  const phases = [];
-  const tasks = [];
-  let planEvent = null;
-  let currentPhase = null;
-  let currentTask = null;
+function getLivePhases(session) {
+  if (!session) return [];
+  return (
+    session.phases ||
+    session.result?.phases ||
+    session.plan?.phases ||
+    session.result?.plan?.phases ||
+    session.result?.planning_trace?.revised_plan?.phases ||
+    session.result?.planning_trace?.initial_plan?.phases ||
+    session.planning_trace?.revised_plan?.phases ||
+    session.planning_trace?.initial_plan?.phases ||
+    []
+  );
+}
 
-  sorted.forEach((event) => {
-    const data = event.data || {};
+function getDisabledAgents(session) {
+  if (!session) return [];
+  return session.disabled_agents || session.result?.disabled_agents || [];
+}
 
-    if (event.type === 'plan_created') {
-      planEvent = event;
-    }
-
-    if (event.type === 'phase_started') {
-      currentPhase = {
-        phase: data.phase,
-        totalPhases: data.total_phases,
-        mode: data.mode,
-        taskIds: data.task_ids || [],
-      };
-      phases.push({
-        id: `phase-${data.phase}`,
-        phase: data.phase,
-        title: `Phase ${data.phase}`,
-        description: data.task_ids?.length
-          ? `Tasks: ${data.task_ids.join(', ')}`
-          : 'Work started',
-        status: 'running',
-      });
-    }
-
-    if (event.type === 'phase_completed') {
-      const existing = phases.find((phase) => phase.phase === data.phase);
-      const counts = data.counts || {};
-      const description = `Completed ${counts.success || 0} success, ${counts.failed || 0} failed, ${counts.skipped || 0} skipped`;
-      if (existing) {
-        existing.status = 'completed';
-        existing.description = description;
-      } else {
-        phases.push({
-          id: `phase-${data.phase}`,
-          phase: data.phase,
-          title: `Phase ${data.phase}`,
-          description,
-          status: 'completed',
-        });
-      }
-      if (currentPhase?.phase === data.phase) {
-        currentPhase = null;
-      }
-    }
-
-    if (event.type === 'task_started') {
-      currentTask = {
-        id: data.task_id,
-        title: data.title,
-        agent: data.agent,
-      };
-      tasks.push({
-        id: data.task_id,
-        title: data.title,
-        detail: data.agent ? `Doing now via ${data.agent}` : 'Doing now',
-        status: 'running',
-      });
-    }
-
-    if (event.type === 'task_completed' || event.type === 'task_failed') {
-      const existing = tasks.find((task) => task.id === data.task_id);
-      const status = event.type === 'task_completed' ? 'completed' : 'failed';
-      const detail =
-        event.type === 'task_completed'
-          ? data.summary || 'Finished'
-          : data.error || 'Failed';
-      if (existing) {
-        existing.status = status;
-        existing.detail = detail;
-      } else {
-        tasks.push({
-          id: data.task_id,
-          title: data.title || data.task_id,
-          detail,
-          status,
-        });
-      }
-      if (currentTask?.id === data.task_id) {
-        currentTask = null;
-      }
-    }
-  });
-
-  if (planEvent?.data?.plan?.phases?.length) {
-    const phaseStatuses = new Map(phases.map((phase) => [phase.phase, phase]));
-    planEvent.data.plan.phases.forEach((phase) => {
-      if (!phaseStatuses.has(phase.phase)) {
-        phases.push({
-          id: `phase-${phase.phase}`,
-          phase: phase.phase,
-          title: `Phase ${phase.phase}`,
-          description: phase.description || `Tasks: ${(phase.task_ids || []).join(', ')}`,
-          status: 'pending',
-        });
-      } else {
-        const existing = phaseStatuses.get(phase.phase);
-        if (existing.status === 'pending' || existing.description?.startsWith('Tasks:')) {
-          existing.description = phase.description || existing.description;
-        }
-      }
-    });
-    phases.sort((a, b) => a.phase - b.phase);
-  }
-
-  const latestEvent = sorted[sorted.length - 1];
-  const completedTasks = tasks.filter((task) => task.status === 'completed').slice(-4).reverse();
-  const failedTasks = tasks.filter((task) => task.status === 'failed').slice(-2).reverse();
-
-  const currentMessage = currentTask
-    ? `${currentTask.title}${currentTask.agent ? ` via ${currentTask.agent}` : ''}`
-    : currentPhase
-      ? `Phase ${currentPhase.phase}/${currentPhase.totalPhases} is in progress`
-      : latestEvent
-        ? formatEventSummary(latestEvent)
-        : 'Waiting for orchestration to start';
-
-  return {
-    latestEvent,
-    planEvent,
-    currentMessage,
-    currentPhase,
-    completedTasks,
-    failedTasks,
-    phases,
-    recentEvents: sorted.slice(-8),
-  };
+function getExecutionSummary(session) {
+  if (!session) return '';
+  return session.execution_summary || session.result?.execution_summary || '';
 }
 
 function App() {
@@ -205,41 +58,36 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [selectedSession, setSelectedSession] = useState(null);
   const [activeTab, setActiveTab] = useState('run');
-  const eventsEndRef = useRef(null);
-  const pollTimeoutRef = useRef(null);
-  const activePollSessionRef = useRef(null);
-
-  const stopPolling = () => {
-    if (pollTimeoutRef.current) {
-      clearTimeout(pollTimeoutRef.current);
-      pollTimeoutRef.current = null;
-    }
-  };
 
   // Fetch sessions on mount and every 5 seconds
   useEffect(() => {
     fetchSessions();
     const interval = setInterval(fetchSessions, 5000);
-    return () => {
-      clearInterval(interval);
-      stopPolling();
-    };
+    // Check for running session in localStorage
+    const savedSessionId = localStorage.getItem('runningSessionId');
+    if (savedSessionId) {
+      restoreRunningSession(savedSessionId);
+    }
+    return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    if (runningSession?.session_id) {
-      return;
+  const restoreRunningSession = async (sessionId) => {
+    try {
+      const statusRes = await fetch(`${API_BASE}/status/${sessionId}`);
+      if (statusRes.ok) {
+        const statusData = await statusRes.json();
+        if (statusData.status === 'running') {
+          setRunningSession(statusData);
+          setActiveTab('status');
+          pollStatus(sessionId);
+        } else {
+          localStorage.removeItem('runningSessionId');
+        }
+      }
+    } catch (error) {
+      console.error('Failed to restore running session:', error);
     }
-
-    const latestActiveSession = sessions.find((session) =>
-      ['running', 'pending', 'starting', 'started', 'incomplete'].includes(session.status)
-    );
-
-    if (latestActiveSession?.session_id) {
-      setRunningSession((current) => current ?? latestActiveSession);
-      pollStatus(latestActiveSession.session_id);
-    }
-  }, [sessions, runningSession?.session_id]);
+  };
 
   const fetchSessions = async () => {
     try {
@@ -253,7 +101,6 @@ function App() {
 
   const runTask = async () => {
     if (!task.trim()) return;
-    
     setLoading(true);
     try {
       const response = await fetch(`${API_BASE}/run`, {
@@ -261,11 +108,11 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ task }),
       });
-      
       const data = await response.json();
       setRunningSession(data);
       setActiveTab('status');
-      
+      // Save session ID to localStorage
+      localStorage.setItem('runningSessionId', data.session_id);
       // Poll for status
       pollStatus(data.session_id);
     } catch (error) {
@@ -276,39 +123,42 @@ function App() {
   };
 
   const pollStatus = async (sessionId) => {
-    stopPolling();
-    activePollSessionRef.current = sessionId;
-
     const poll = async () => {
-      if (activePollSessionRef.current !== sessionId) {
-        return;
-      }
-
       try {
-        const response = await fetch(`${API_BASE}/status/${sessionId}`);
-        const data = await response.json();
-
-        if (response.ok && ['pending', 'starting', 'started', 'running'].includes(data.status)) {
-          setRunningSession(data);
-          pollTimeoutRef.current = setTimeout(poll, 3000);
-        } else if (response.status === 404) {
-          pollTimeoutRef.current = setTimeout(poll, 3000);
+        const statusRes = await fetch(`${API_BASE}/status/${sessionId}`);
+        const statusData = await statusRes.json();
+        if (statusData.status === 'running') {
+          const resultsRes = await fetch(`${API_BASE}/results/${sessionId}`);
+          if (resultsRes.ok && resultsRes.status === 200) {
+            const resultsData = await resultsRes.json();
+            setRunningSession({ ...statusData, ...resultsData });
+          } else {
+            setRunningSession(statusData);
+          }
+          // Also try to fetch checkpoint for live file updates
+          try {
+            const checkpointRes = await fetch(`${API_BASE}/checkpoint/${sessionId}`);
+            if (checkpointRes.ok) {
+              const checkpointData = await checkpointRes.json();
+              setRunningSession(prev => ({ ...prev, checkpoint: checkpointData }));
+            }
+          } catch (e) {
+            // Checkpoint endpoint might not exist, ignore
+          }
+          setTimeout(poll, 2000);
         } else {
-          setRunningSession(data);
-          activePollSessionRef.current = null;
+          setRunningSession(statusData);
           fetchSessions();
+          localStorage.removeItem('runningSessionId');
         }
       } catch (error) {
         console.error('Failed to poll status:', error);
-        pollTimeoutRef.current = setTimeout(poll, 3000);
       }
     };
     poll();
   };
 
   const viewResults = async (sessionId) => {
-    stopPolling();
-    activePollSessionRef.current = null;
     try {
       const response = await fetch(`${API_BASE}/results/${sessionId}`);
       const data = await response.json();
@@ -317,12 +167,6 @@ function App() {
     } catch (error) {
       console.error('Failed to fetch results:', error);
     }
-  };
-
-  const viewStatus = (session) => {
-    setRunningSession(session);
-    setActiveTab('status');
-    pollStatus(session.session_id);
   };
 
   const getStatusColor = (status) => {
@@ -334,242 +178,306 @@ function App() {
     }
   };
 
-  const executionView = buildExecutionView(runningSession?.events || []);
-  const planData = executionView.planEvent?.data?.plan;
-  const executionSummary = executionView.planEvent?.data?.execution_summary;
-
-  useEffect(() => {
-    eventsEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [executionView.recentEvents.length]);
+  const currentPlan = getLivePlan(runningSession);
+  const planningTrace = getPlanningTrace(runningSession);
+  const planSummary = getLiveSummary(runningSession);
+  const orchestrationPhases = getLivePhases(runningSession);
+  const disabledAgents = getDisabledAgents(runningSession);
+  const executionSummary = getExecutionSummary(runningSession);
 
   return (
     <div className="app">
       <header className="header">
-        <h1>🤖 Multi-Agent Orchestrator</h1>
+        <h1>🤖 MULTI-AGENT ORCHESTRATOR</h1>
         <p className="subtitle">AI Development Team OS</p>
       </header>
 
-      <nav className="tabs">
-        <button 
-          className={activeTab === 'run' ? 'active' : ''}
-          onClick={() => setActiveTab('run')}
-        >
-          New Task
-        </button>
-        <button 
-          className={activeTab === 'status' ? 'active' : ''}
-          onClick={() => setActiveTab('status')}
-        >
+      <nav className="nav">
+        <button className={activeTab === 'run' ? 'active' : ''} onClick={() => setActiveTab('run')}>New Task</button>
+        <button className={activeTab === 'status' ? 'active' : ''} onClick={() => setActiveTab('status')}>
           Status {runningSession && '(Running)'}
         </button>
-        <button 
-          className={activeTab === 'history' ? 'active' : ''}
-          onClick={() => setActiveTab('history')}
-        >
-          History
-        </button>
-        <button 
-          className={activeTab === 'results' ? 'active' : ''}
-          onClick={() => setActiveTab('results')}
-          disabled={!selectedSession}
-        >
-          Results
-        </button>
+        <button className={activeTab === 'history' ? 'active' : ''} onClick={() => setActiveTab('history')}>History</button>
+        <button className={activeTab === 'results' ? 'active' : ''} onClick={() => setActiveTab('results')} disabled={!selectedSession}>Results</button>
       </nav>
 
-      <main className="content">
+      <main className="main">
         {activeTab === 'run' && (
-          <div className="run-task">
-            <h2>Run New Task</h2>
+          <div className="run-tab">
+            <h2>RUN NEW TASK</h2>
             <textarea
               value={task}
               onChange={(e) => setTask(e.target.value)}
               placeholder="Describe what you want to build... (e.g., 'Build a REST API with user authentication using Flask and SQLite')"
               rows={5}
             />
-            <button 
-              className="primary"
-              onClick={runTask}
-              disabled={loading || !task.trim()}
-            >
+            <button onClick={runTask} disabled={loading}>
               {loading ? 'Starting...' : '🚀 Run Task'}
             </button>
-            
+
             <div className="examples">
-              <h3>Example Tasks:</h3>
+              <h3>EXAMPLE TASKS:</h3>
               <ul>
-                <li onClick={() => setTask('Build a Flask REST API with CRUD endpoints for a todo app')}
-                    className="example-item">
-                  📝 Build a Flask REST API with CRUD endpoints for a todo app
-                </li>
-                <li onClick={() => setTask('Build a chat application with authentication and real-time messaging')}
-                    className="example-item">
-                  💬 Build a chat application with authentication
-                </li>
-                <li onClick={() => setTask('Build a dashboard showing user analytics with charts')}
-                    className="example-item">
-                  📊 Build a dashboard showing user analytics
-                </li>
+                <li onClick={() => setTask('Build a Flask REST API with CRUD endpoints for a todo app')} className="example-item">📝 Build a Flask REST API with CRUD endpoints for a todo app</li>
+                <li onClick={() => setTask('Build a chat application with authentication and real-time messaging')} className="example-item">💬 Build a chat application with authentication</li>
+                <li onClick={() => setTask('Build a dashboard showing user analytics with charts')} className="example-item">📊 Build a dashboard showing user analytics</li>
               </ul>
             </div>
           </div>
         )}
 
         {activeTab === 'status' && (
-          <div className="status">
-            <h2>Execution Status</h2>
+          <div className="status-tab">
+            <h2>EXECUTION STATUS</h2>
             {runningSession ? (
-              <div className="status-card">
-                <div className="status-header">
-                  <span 
-                    className="status-badge"
-                    style={{ backgroundColor: getStatusColor(runningSession.status) }}
-                  >
-                    {runningSession.status}
-                  </span>
-                  <span className="session-id">{runningSession.session_id}</span>
+              <div>
+                <div className="status-badge" style={{ backgroundColor: getStatusColor(runningSession.status) }}>
+                  {runningSession.status}
                 </div>
-                <p className="task">{runningSession.task}</p>
+                <p className="session-id">Session: {runningSession.session_id}</p>
+                <p className="task">{runningSession.task || runningSession.result?.goal_analysis?.original_goal}</p>
+
                 {runningSession.status === 'running' && (
-                  <div className="loading">
-                    <div className="spinner"></div>
-                    <p>{executionView.currentMessage || 'Executing task... This may take 2-5 minutes'}</p>
-                  </div>
-                )}
-                {executionView.phases.length > 0 && (
-                  <div className="status-section">
-                    <h3>Execution Plan</h3>
-                    <div className="phase-list">
-                      {executionView.phases.map((phase) => (
-                        <div key={phase.id} className={`phase-item ${phase.status}`}>
-                          <div className="phase-title-row">
-                            <span className="phase-title">{phase.title}</span>
-                            <span className={`phase-status ${phase.status}`}>
-                              {phase.status === 'running'
-                                ? 'Doing'
-                                : phase.status === 'completed'
-                                  ? 'Done'
-                                  : phase.status === 'failed'
-                                    ? 'Failed'
-                                    : 'Pending'}
-                            </span>
+                  <div className="live-status">
+                    <h3>LIVE AGENT ACTIVITY</h3>
+                    {(() => {
+                      const events = runningSession.events || [];
+                      const lastTaskStarted = [...events].reverse().find(e => e.type === 'task_started');
+                      const lastTaskCompleted = [...events].reverse().find(e => e.type === 'task_completed');
+                      const lastPhaseStarted = [...events].reverse().find(e => e.type === 'phase_started');
+                      const currentPhase = lastPhaseStarted?.data;
+                      return (
+                        <>
+                          {lastTaskStarted && !lastTaskCompleted && (
+                            <div className="current-task">
+                              <strong>{lastTaskStarted.data?.agent?.toUpperCase()}</strong> is working on: {lastTaskStarted.data?.title}
+                            </div>
+                          )}
+                          {lastTaskCompleted && !lastTaskStarted && (
+                            <div className="waiting">⏳ Waiting for next task...</div>
+                          )}
+                          {currentPhase && (
+                            <div className="phase-info">
+                              Phase {currentPhase.phase}/{currentPhase.total_phases} - {currentPhase.mode?.toUpperCase()} mode
+                            </div>
+                          )}
+                          <div className="events-feed">
+                            {events.slice(-12).map((event, idx) => {
+                              const isNew = idx === events.length - 1;
+                              return (
+                                <div key={idx} className={`event ${isNew ? 'new' : ''}`}>
+                                  <span className="event-icon">
+                                    {event.type === 'task_started' && '⚡'}
+                                    {event.type === 'task_completed' && '✅'}
+                                    {event.type === 'task_failed' && '❌'}
+                                    {event.type === 'phase_started' && '🚀'}
+                                    {event.type === 'phase_completed' && '📦'}
+                                    {event.type === 'info' && '💬'}
+                                    {event.type === 'warning' && '⚠️'}
+                                    {event.type === 'plan_created' && '📝'}
+                                    {event.type === 'plan_review_completed' && '🔍'}
+                                    {event.type === 'plan_approved' && '👍'}
+                                    {event.type === 'run_started' && '▶️'}
+                                    {!['task_started', 'task_completed', 'task_failed', 'phase_started', 'phase_completed', 'info', 'warning', 'plan_created', 'plan_review_completed', 'plan_approved', 'run_started'].includes(event.type) && '📋'}
+                                  </span>
+                                  <span className="event-text">
+                                    {event.type === 'task_started' && (
+                                      <><strong>{event.data?.agent?.toUpperCase()}</strong> {'->'} {event.data?.title}</>
+                                    )}
+                                    {event.type === 'task_completed' && (
+                                      <><strong>{event.data?.agent?.toUpperCase()}</strong> ✅ {event.data?.execution_time?.toFixed(1)}s
+                                      {event.data?.summary && ` - ${event.data.summary.slice(0, 60)}${event.data.summary?.length > 60 ? '...' : ''}`}</>
+                                    )}
+                                    {event.type === 'task_failed' && (
+                                      <><strong>{event.data?.agent?.toUpperCase()}</strong> ❌ {event.data?.error?.slice(0, 50)}</>
+                                    )}
+                                    {event.type === 'phase_started' && (
+                                      <>🚀 Phase {event.data?.phase}/{event.data?.total_phases}: {event.data?.task_ids?.join(', ')}</>
+                                    )}
+                                    {event.type === 'phase_completed' && (
+                                      <>📦 Phase {event.data?.phase} done</>
+                                    )}
+                                    {event.type === 'info' && (
+                                      <>{event.data?.message}</>
+                                    )}
+                                    {event.type === 'warning' && (
+                                      <>⚠️ {event.data?.message}</>
+                                    )}
+                                    {event.type === 'plan_created' && (
+                                      <>📝 Plan: {event.data?.task_count} tasks, {event.data?.phase_count} phases</>
+                                    )}
+                                    {event.type === 'plan_review_completed' && (
+                                      <>🔍 Review {event.data?.iteration}: {event.data?.approval ? 'Approved' : 'Rejected'} ({event.data?.confidence})</>
+                                    )}
+                                    {event.type === 'plan_approved' && (
+                                      <>👍 Plan approved</>
+                                    )}
+                                    {!['task_started', 'task_completed', 'task_failed', 'phase_started', 'phase_completed', 'info', 'warning', 'plan_created', 'plan_review_completed', 'plan_approved', 'run_started'].includes(event.type) && (
+                                      <>{JSON.stringify(event.data)?.slice(0, 80)}</>
+                                    )}
+                                  </span>
+                                </div>
+                              );
+                            })}
                           </div>
-                          <p className="phase-description">{phase.description}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {planData && (
-                  <div className="status-section">
-                    <h3>Planner Output</h3>
-                    {planData.epic && (
-                      <div className="planner-block">
-                        <div className="planner-label">Epic</div>
-                        <p className="planner-copy">{planData.epic}</p>
+                        </>
+                      );
+                    })()}
+
+                    {runningSession.checkpoint?.tasks && Object.keys(runningSession.checkpoint.tasks).length > 0 && (
+                      <div className="files-generated">
+                        <h4>FILES GENERATED</h4>
+                        <p>📁 Project: project/{runningSession.session_id}/</p>
+                        {Object.values(runningSession.checkpoint.tasks)
+                          .filter(t => t.status === 'success' && t.result?.files_created?.length > 0)
+                          .map(task => (
+                            <div key={task.id} className="task-files">
+                              <strong>{task.id}:</strong>
+                              <ul>
+                                {task.result.files_created.map((file, i) => (
+                                  <li key={i}>{file}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          ))
+                        }
                       </div>
                     )}
-                    {planData.tasks?.length > 0 && (
-                      <div className="planner-block">
-                        <div className="planner-label">Tasks</div>
-                        <div className="planner-rows">
-                          {planData.tasks.map((item) => (
-                            <div key={item.id} className="planner-row">
-                              <div className="planner-row-main">
-                                <span className="planner-id">{item.id}</span>
-                                <span className="planner-title">{item.title}</span>
-                              </div>
-                              <div className="planner-meta">
-                                <span>{item.agent}</span>
-                                <span>{item.type}</span>
-                                {item.dependencies?.length > 0 && (
-                                  <span>{`depends on ${item.dependencies.join(', ')}`}</span>
-                                )}
-                              </div>
+
+                    {currentPlan?.tasks && (
+                      <div className="plan-section">
+                        <h3>EXECUTION PLAN</h3>
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>ID</th>
+                              <th>Title</th>
+                              <th>Agent</th>
+                              <th>Type</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {currentPlan.tasks.map((task) => (
+                              <tr key={task.id}>
+                                <td>{task.id}</td>
+                                <td>{task.title}</td>
+                                <td>{task.agent}</td>
+                                <td>{task.type}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    {disabledAgents.length > 0 && (
+                      <div className="agent-health-section">
+                        <h3>DISABLED AGENTS</h3>
+                        <div className="disabled-agent-list">
+                          {disabledAgents.map((item) => (
+                            <div key={item.agent} className="disabled-agent-item">
+                              <strong>{item.agent}</strong>
+                              <span>{item.reason}</span>
                             </div>
                           ))}
                         </div>
                       </div>
                     )}
-                    {planData.phases?.length > 0 && (
-                      <div className="planner-block">
-                        <div className="planner-label">Phases</div>
-                        <div className="planner-rows">
-                          {planData.phases.map((phase) => (
-                            <div key={phase.phase} className="planner-row">
-                              <div className="planner-row-main">
-                                <span className="planner-title">
-                                  {`Phase ${phase.phase} (${phase.parallel ? 'parallel' : 'sequential'})`}
-                                </span>
-                              </div>
-                              <div className="planner-copy">{phase.description}</div>
-                              <div className="planner-meta">
-                                <span>{`Tasks: ${(phase.task_ids || []).join(', ')}`}</span>
-                              </div>
+
+                    {planSummary?.tasks && (
+                      <div className="progress-section">
+                        <h3>PLAN PROGRESS</h3>
+                        <p>{planSummary.counts?.completed || 0} / {planSummary.total} tasks completed</p>
+                        <div className="task-list">
+                          {planSummary.tasks.map((task) => (
+                            <div key={task.id} className={`task-item ${task.status}`}>
+                              <span className="task-id">{task.id}</span>
+                              <span className="task-title">{task.title}</span>
+                              <span className="task-agent">{task.agent}</span>
+                              <span className="task-status">
+                                {task.status === 'completed' ? '✓' : task.status === 'running' ? '⟳' : task.status === 'failed' ? '✗' : '○'}
+                              </span>
                             </div>
                           ))}
                         </div>
                       </div>
                     )}
+
+                    {orchestrationPhases.length > 0 && (
+                      <div className="orchestration-section">
+                        <h3>ORCHESTRATION PLAN</h3>
+                        {orchestrationPhases.map((phase) => (
+                          <div key={phase.phase} className="phase-item">
+                            <strong>Phase {phase.phase}</strong>
+                            <span>{phase.description}</span>
+                            <code>{phase.task_ids.join(', ')}</code>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
                     {executionSummary && (
-                      <div className="planner-block">
-                        <div className="planner-label">Computed Execution Order</div>
-                        <pre className="planner-pre">{executionSummary}</pre>
+                      <div className="execution-summary-section">
+                        <h3>EXECUTION ORDER</h3>
+                        <pre>{executionSummary}</pre>
                       </div>
                     )}
-                  </div>
-                )}
-                {(executionView.completedTasks.length > 0 || executionView.failedTasks.length > 0 || executionView.currentPhase) && (
-                  <div className="status-section">
-                    <h3>What The Orchestrator Is Doing</h3>
-                    <div className="progress-list">
-                      {executionView.currentPhase && (
-                        <div className="progress-item doing">
-                          <span className="progress-label">Doing</span>
-                          <span className="progress-text">
-                            {`Phase ${executionView.currentPhase.phase}/${executionView.currentPhase.totalPhases} is active`}
-                          </span>
+
+                    {planningTrace && (
+                      <div className="planning-section">
+                        <h3>PLANNING REVIEW</h3>
+                        {planningTrace.review_1 && (
+                          <div className="review">
+                            <strong>Review 1</strong>
+                            <span>{planningTrace.review_1.approval ? 'Approved' : 'Rejected'}</span>
+                            <span>Confidence: {planningTrace.review_1.confidence ?? 'n/a'}</span>
+                          </div>
+                        )}
+                        {planningTrace.review_2 && (
+                          <div className="review">
+                            <strong>Review 2</strong>
+                            <span>{planningTrace.review_2.approval ? 'Approved' : 'Rejected'}</span>
+                            <span>Confidence: {planningTrace.review_2.confidence ?? 'n/a'}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {runningSession.events && runningSession.events.length > 0 && (
+                      <div className="events-section">
+                        <h3>RECENT EVENTS</h3>
+                        <div className="events-list">
+                          {runningSession.events.slice(-15).map((event, idx) => (
+                            <div key={idx} className="event-item">
+                              <strong>{event.type}</strong>
+                              <span>
+                                {event.type === 'phase_started' && `Phase ${event.data?.phase}`}
+                                {event.type === 'phase_completed' && `Phase ${event.data?.phase} done`}
+                                {event.type === 'task_started' && `${event.data?.task_id}: ${event.data?.title}`}
+                                {event.type === 'task_completed' && `${event.data?.task_id}: SUCCESS`}
+                                {event.type === 'task_failed' && `${event.data?.task_id}: FAILED`}
+                                {event.type === 'info' && event.data?.message?.slice(0, 60)}
+                                {!['phase_started', 'phase_completed', 'task_started', 'task_completed', 'task_failed', 'info'].includes(event.type) && JSON.stringify(event.data)?.slice(0, 80)}
+                              </span>
+                            </div>
+                          ))}
                         </div>
-                      )}
-                      {executionView.completedTasks.map((task) => (
-                        <div key={task.id} className="progress-item done">
-                          <span className="progress-label">Done</span>
-                          <span className="progress-text">{`${task.id}: ${task.title}`}</span>
-                        </div>
-                      ))}
-                      {executionView.failedTasks.map((task) => (
-                        <div key={task.id} className="progress-item failed">
-                          <span className="progress-label">Failed</span>
-                          <span className="progress-text">{`${task.id}: ${task.title}`}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {runningSession.events && runningSession.events.length > 0 && (
-                  <div className="events">
-                    <h3>Recent Orchestration Updates</h3>
-                    <div className="events-list">
-                      {executionView.recentEvents.map((event, idx) => (
-                        <div key={idx} className="event-item">
-                          <span className="event-type">{EVENT_TYPE_LABELS[event.type] || toSentenceCase(event.type.replaceAll('_', ' '))}</span>
-                          <span className="event-data">{formatEventSummary(event)}</span>
-                        </div>
-                      ))}
-                      <div ref={eventsEndRef} />
-                    </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
             ) : (
-              <p className="no-data">No running session. Start a new task!</p>
+              <div className="no-session">
+                <p>No running session. Start a new task!</p>
+              </div>
             )}
           </div>
         )}
 
         {activeTab === 'history' && (
-          <div className="history">
-            <h2>Session History</h2>
+          <div className="history-tab">
+            <h2>SESSION HISTORY</h2>
             {sessions.length > 0 ? (
               <table className="sessions-table">
                 <thead>
@@ -584,33 +492,17 @@ function App() {
                 <tbody>
                   {sessions.map((session) => (
                     <tr key={session.session_id}>
-                      <td className="session-id-cell">{session.session_id}</td>
-                      <td className="task-cell">{session.task}</td>
+                      <td><code>{session.session_id}</code></td>
+                      <td>{session.task}</td>
                       <td>
-                        <span 
-                          className="status-badge"
-                          style={{ backgroundColor: getStatusColor(session.status) }}
-                        >
+                        <span className="status-badge" style={{ backgroundColor: getStatusColor(session.status) }}>
                           {session.status}
                         </span>
                       </td>
                       <td>{new Date(session.started_at).toLocaleString()}</td>
                       <td>
-                        {session.status !== 'completed' && (
-                          <button
-                            className="small"
-                            onClick={() => viewStatus(session)}
-                          >
-                            View Status
-                          </button>
-                        )}
                         {session.status === 'completed' && (
-                          <button 
-                            className="small"
-                            onClick={() => viewResults(session.session_id)}
-                          >
-                            View Results
-                          </button>
+                          <button onClick={() => viewResults(session.session_id)}>View Results</button>
                         )}
                       </td>
                     </tr>
@@ -618,49 +510,137 @@ function App() {
                 </tbody>
               </table>
             ) : (
-              <p className="no-data">No sessions yet. Run your first task!</p>
+              <div className="no-sessions">
+                <p>No sessions yet. Run your first task!</p>
+              </div>
             )}
           </div>
         )}
 
         {activeTab === 'results' && selectedSession && (
-          <div className="results">
-            <h2>Results: {selectedSession.session_id}</h2>
-            <div className="result-card">
-              <div className="result-section">
-                <h3>Status</h3>
-                <span 
-                  className="status-badge"
-                  style={{ backgroundColor: getStatusColor(selectedSession.status) }}
-                >
-                  {selectedSession.status}
-                </span>
-              </div>
-              
-              {selectedSession.result && (
-                <>
-                  <div className="result-section">
-                    <h3>Project Directory</h3>
-                    <code>{selectedSession.result.project_dir}</code>
-                  </div>
-                  
-                  <div className="result-section">
-                    <h3>Build Result</h3>
-                    <pre>{JSON.stringify(selectedSession.result.build_result, null, 2)}</pre>
-                  </div>
-                  
-                  <div className="result-section">
-                    <h3>Validation</h3>
-                    <pre>{JSON.stringify(selectedSession.result.validation_result, null, 2)}</pre>
-                  </div>
-                  
-                  <div className="result-section">
-                    <h3>Runtime</h3>
-                    <pre>{JSON.stringify(selectedSession.result.runtime_result, null, 2)}</pre>
-                  </div>
-                </>
-              )}
+          <div className="results-tab">
+            <h2>RESULTS: {selectedSession.session_id}</h2>
+            <div className="status-badge" style={{ backgroundColor: getStatusColor(selectedSession.status) }}>
+              {selectedSession.status}
             </div>
+
+            {selectedSession.result && (
+              <>
+                {selectedSession.result.summary && (
+                  <div className="result-section">
+                    <h3>TASK SUMMARY</h3>
+                    <p>
+                      Total: {selectedSession.result.summary.total} |
+                      Completed: {selectedSession.result.summary.counts?.success || 0} |
+                      Failed: {selectedSession.result.summary.counts?.failed || 0}
+                    </p>
+                    <div className="task-list">
+                      {selectedSession.result.summary.tasks?.map((task) => (
+                        <div key={task.id} className={`task-item ${task.status}`}>
+                          <span className="task-id">{task.id}</span>
+                          <span className="task-title">{task.title}</span>
+                          <span className="task-agent">{task.agent}</span>
+                          <span className="task-status">
+                            {task.status === 'success' ? '✓' : task.status === 'failed' ? '✗' : task.status === 'running' ? '⟳' : '○'}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {(selectedSession.result.disabled_agents?.length > 0 || selectedSession.disabled_agents?.length > 0) && (
+                  <div className="result-section">
+                    <h3>DISABLED AGENTS</h3>
+                    <div className="disabled-agent-list">
+                      {(selectedSession.result.disabled_agents || selectedSession.disabled_agents || []).map((item) => (
+                        <div key={item.agent} className="disabled-agent-item">
+                          <strong>{item.agent}</strong>
+                          <span>{item.reason}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {(selectedSession.result.execution_summary || selectedSession.execution_summary) && (
+                  <div className="result-section">
+                    <h3>EXECUTION ORDER</h3>
+                    <pre>{selectedSession.result.execution_summary || selectedSession.execution_summary}</pre>
+                  </div>
+                )}
+
+                {selectedSession.result.summary?.counts?.success > 0 && (
+                  <div className="result-section">
+                    <h3>GENERATED FILES</h3>
+                    <p>📁 Project Location: flask_api/project/{selectedSession.session_id}/</p>
+                  </div>
+                )}
+
+                {selectedSession.result.goal_analysis && (
+                  <div className="result-section">
+                    <h3>GOAL ANALYSIS</h3>
+                    <pre>{JSON.stringify(selectedSession.result.goal_analysis, null, 2)}</pre>
+                  </div>
+                )}
+
+                {selectedSession.result.project_build && Object.keys(selectedSession.result.project_build).length > 0 && (
+                  <div className="result-section">
+                    <h3>PROJECT BUILD</h3>
+                    <pre>{JSON.stringify(selectedSession.result.project_build, null, 2)}</pre>
+                  </div>
+                )}
+
+                {selectedSession.result.validation && Object.keys(selectedSession.result.validation).length > 0 && (
+                  <div className="result-section">
+                    <h3>VALIDATION</h3>
+                    <pre>{JSON.stringify(selectedSession.result.validation, null, 2)}</pre>
+                  </div>
+                )}
+
+                {selectedSession.result.runtime && Object.keys(selectedSession.result.runtime).length > 0 && (
+                  <div className="result-section">
+                    <h3>RUNTIME</h3>
+                    <pre>{JSON.stringify(selectedSession.result.runtime, null, 2)}</pre>
+                  </div>
+                )}
+
+                {selectedSession.result.evaluation && Object.keys(selectedSession.result.evaluation).length > 0 && (
+                  <div className="result-section">
+                    <h3>EVALUATION</h3>
+                    <pre>{JSON.stringify(selectedSession.result.evaluation, null, 2)}</pre>
+                  </div>
+                )}
+
+                {selectedSession.result.final_review && (
+                  <div className="result-section">
+                    <h3>FINAL REVIEW</h3>
+                    <pre>{JSON.stringify(selectedSession.result.final_review, null, 2)}</pre>
+                  </div>
+                )}
+
+                {selectedSession.result.planning_trace && (
+                  <div className="result-section">
+                    <h3>PLANNING TRACE</h3>
+                    <pre>{JSON.stringify(selectedSession.result.planning_trace, null, 2)}</pre>
+                  </div>
+                )}
+
+                {selectedSession.events && selectedSession.events.length > 0 && (
+                  <div className="result-section">
+                    <h3>EVENTS ({selectedSession.events.length})</h3>
+                    <div className="events-list">
+                      {selectedSession.events.slice(-20).map((event, idx) => (
+                        <div key={idx} className="event-item">
+                          <strong>{event.type}</strong>
+                          <span>{JSON.stringify(event.data)?.slice(0, 100)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
       </main>

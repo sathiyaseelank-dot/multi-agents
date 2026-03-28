@@ -33,6 +33,44 @@ running_sessions = {}
 completed_sessions = {}
 
 
+def _load_session_artifacts(session_id: str, memory_dir: Path) -> dict:
+    """Load persisted plan/results data for the API session."""
+    artifacts: dict = {}
+
+    plan_file = memory_dir / f"plan-{session_id}.json"
+    results_file = memory_dir / f"results-{session_id}.json"
+
+    if plan_file.exists():
+        try:
+            with open(plan_file) as f:
+                plan_data = json.load(f)
+            artifacts["plan"] = plan_data.get("plan")
+            artifacts["phases"] = plan_data.get("phases") or plan_data.get("plan", {}).get("phases")
+            artifacts["planning_trace"] = plan_data.get("planning_trace")
+            artifacts["review_iterations"] = plan_data.get("review_iterations")
+            artifacts["final_review"] = plan_data.get("final_review")
+            artifacts["disabled_agents"] = plan_data.get("disabled_agents", [])
+        except Exception:
+            logger.exception("Failed to read plan artifact for %s", session_id)
+
+    if results_file.exists():
+        try:
+            with open(results_file) as f:
+                results_data = json.load(f)
+            artifacts["summary"] = results_data.get("summary")
+            artifacts["result"] = results_data
+            artifacts["phases"] = results_data.get("phases", artifacts.get("phases", []))
+            artifacts["execution_summary"] = results_data.get("execution_summary")
+            artifacts["disabled_agents"] = results_data.get(
+                "disabled_agents",
+                artifacts.get("disabled_agents", []),
+            )
+        except Exception:
+            logger.exception("Failed to read results artifact for %s", session_id)
+
+    return artifacts
+
+
 class SessionEventEmitter(EventEmitter):
     """Event emitter that stores events for a session."""
     
@@ -65,12 +103,13 @@ class SessionEventEmitter(EventEmitter):
 def run_orchestrator_async(task_description: str, session_id: str, memory_dir: str):
     """Run orchestrator in a separate thread."""
     import asyncio
-    
+
     async def run():
         emitter = SessionEventEmitter(session_id)
         if session_id in running_sessions:
             running_sessions[session_id]["emitter"] = emitter
         orchestrator = Orchestrator(
+            session_id=session_id,
             memory_dir=memory_dir,
             events=emitter,
         )
@@ -94,7 +133,7 @@ def run_orchestrator_async(task_description: str, session_id: str, memory_dir: s
         finally:
             if session_id in running_sessions:
                 del running_sessions[session_id]
-    
+
     asyncio.run(run())
 
 
@@ -170,6 +209,10 @@ def get_status(session_id):
     # Check completed sessions
     if session_id in completed_sessions:
         session = completed_sessions[session_id]
+        artifacts = _load_session_artifacts(
+            session_id,
+            Path(__file__).parent.parent.parent / "memory",
+        )
         return jsonify({
             "session_id": session_id,
             "status": session["status"],
@@ -177,6 +220,13 @@ def get_status(session_id):
             "error": session.get("error"),
             "events": session.get("events", []),
             "completed_at": session.get("completed_at"),
+            "plan": artifacts.get("plan"),
+            "phases": artifacts.get("phases", []),
+            "execution_summary": artifacts.get("execution_summary"),
+            "planning_trace": artifacts.get("planning_trace"),
+            "review_iterations": artifacts.get("review_iterations"),
+            "final_review": artifacts.get("final_review"),
+            "disabled_agents": artifacts.get("disabled_agents", []),
         })
     
     # Check running sessions
@@ -184,12 +234,25 @@ def get_status(session_id):
         session = running_sessions[session_id]
         emitter = session.get("emitter")
         status = getattr(emitter, "status", session.get("status", "starting"))
+        artifacts = _load_session_artifacts(
+            session_id,
+            Path(__file__).parent.parent.parent / "memory",
+        )
         return jsonify({
             "session_id": session_id,
             "status": "running" if status in {"pending", "starting"} else status,
             "task": session.get("task"),
             "started_at": session.get("started_at"),
             "events": emitter.events_list if emitter else [],
+            "plan": artifacts.get("plan"),
+            "phases": artifacts.get("phases", []),
+            "execution_summary": artifacts.get("execution_summary"),
+            "summary": artifacts.get("summary"),
+            "result": artifacts.get("result"),
+            "planning_trace": artifacts.get("planning_trace"),
+            "review_iterations": artifacts.get("review_iterations"),
+            "final_review": artifacts.get("final_review"),
+            "disabled_agents": artifacts.get("disabled_agents", []),
         })
     
     return jsonify({"error": "Session not found"}), 404
@@ -216,11 +279,19 @@ def get_results(session_id):
     """
     if session_id in completed_sessions:
         session = completed_sessions[session_id]
+        artifacts = _load_session_artifacts(
+            session_id,
+            Path(__file__).parent.parent.parent / "memory",
+        )
         return jsonify({
             "session_id": session_id,
             "status": session["status"],
             "result": session.get("result", {}),
             "events": session.get("events", []),
+            "plan": artifacts.get("plan"),
+            "phases": artifacts.get("phases", []),
+            "execution_summary": artifacts.get("execution_summary"),
+            "disabled_agents": artifacts.get("disabled_agents", []),
         })
     
     if session_id in running_sessions:
