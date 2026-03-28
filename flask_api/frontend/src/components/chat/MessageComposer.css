@@ -1,0 +1,115 @@
+.message-composer {
+  background: white;
+  border-top: 1px solid #e0e0e0;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.composer-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #fee;
+  color: #c00;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.error-dismiss {
+  background: none;
+  border: none;
+  color: #c00;
+  cursor: pointer;
+  font-size: 18px;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.composer-container {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  background: #f5f5f5;
+  border-radius: 24px;
+  padding: 8px 12px;
+  transition: box-shadow 0.2s;
+}
+
+.composer-container:focus-within {
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.3);
+}
+
+.composer-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  resize: none;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+  padding: 4px 0;
+  max-height: 150px;
+  outline: none;
+  min-height: 24px;
+}
+
+.composer-input::placeholder {
+  color: #999;
+}
+
+.composer-input:disabled {
+  opacity: 0.6;
+}
+
+.composer-send {
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s, opacity 0.2s;
+  flex-shrink: 0;
+}
+
+.composer-send:hover:not(:disabled) {
+  transform: scale(1.05);
+}
+
+.composer-send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.composer-send svg {
+  width: 18px;
+  height: 18px;
+}
+
+.send-loading {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.composer-hint {
+  font-size: 11px;
+  color: #aaa;
+  text-align: center;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

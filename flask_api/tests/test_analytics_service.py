@@ -689,8 +689,9 @@ class AnalyticsServiceChartAggregationTestCase(unittest.TestCase):
 
     def test_message_type_distribution_chart_raises_type_error(self):
         with self.app.app_context():
-            with self.assertRaises(TypeError):
-                AnalyticsService.get_chart_data("message_type_distribution", days=7)
+            result = AnalyticsService.get_chart_data("message_type_distribution", days=7)
+            self.assertIn("data", result)
+            self.assertIsInstance(result["data"], list)
 
 
 class AnalyticsRouteErrorHandlingTestCase(unittest.TestCase):
@@ -965,9 +966,10 @@ class AnalyticsRouteIntegrationTestCase(unittest.TestCase):
 
     def test_message_type_distribution_single_type(self):
         response = self.client.get("/api/analytics/charts/message_type_distribution")
-        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.status_code, 200)
         data = response.get_json()
-        self.assertIn("error", data)
+        self.assertIn("data", data)
+        self.assertEqual(len(data["data"]), 1)
 
 
 class AnalyticsServiceNormalizedOutputTestCase(unittest.TestCase):
