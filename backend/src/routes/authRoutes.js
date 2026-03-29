@@ -160,6 +160,30 @@ router.post('/logout', protect, async (req, res) => {
   }
 });
 
+router.post('/refresh', protect, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found',
+      });
+    }
+
+    const token = generateToken(user._id);
+
+    res.json({
+      success: true,
+      data: { token },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
 router.put('/password', protect, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;

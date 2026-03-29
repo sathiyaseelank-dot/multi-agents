@@ -1,0 +1,419 @@
+#!/usr/bin/env python3
+"""API Key Manager CLI - Add, remove, and test API keys interactively."""
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+# Add project root to path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from agents.api_agent import PROVIDER_CONFIGS, create_api_agent, get_available_models
+
+
+def fetch_openrouter_models(api_key: str) -> list[str]:
+    """Fetch available models from OpenRouter API dynamically.
+    
+    Args:
+        api_key: OpenRouter API key
+        
+    Returns:
+        List of model IDs sorted by name
+    """
+    import urllib.request
+    import urllib.error
+    
+    url = "https://openrouter.ai/api/v1/models"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+    
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as response:
+            data = json.loads(response.read().decode())
+            models = data.get("data", [])
+            # Extract model IDs and sort them
+            model_ids = sorted([m.get("id", "") for m in models if m.get("id")])
+            return model_ids
+    except Exception as e:
+        print(colored(f"Warning: Could not fetch models from OpenRouter: {e}", Colors.YELLOW))
+        return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Colors
+# ─────────────────────────────────────────────────────────────────────────────
+class Colors:
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    ENDC = '\033[0m'
+
+
+def colored(text: str, color: str) -> str:
+    return f"{color}{text}{Colors.ENDC}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API Key Storage
+# ─────────────────────────────────────────────────────────────────────────────
+def get_api_keys_file() -> Path:
+    """Get path to API keys configuration file."""
+    config_dir = PROJECT_ROOT / "config"
+    config_dir.mkdir(exist_ok=True)
+    return config_dir / "api_keys.json"
+
+
+def load_api_keys() -> dict:
+    """Load API keys from config file."""
+    keys_file = get_api_keys_file()
+    if keys_file.exists():
+        try:
+            return json.loads(keys_file.read_text())
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def save_api_keys(keys: dict) -> None:
+    """Save API keys to config file."""
+    keys_file = get_api_keys_file()
+    keys_file.write_text(json.dumps(keys, indent=2))
+
+
+def add_api_key(provider: str, api_key: str, model: str, role: str, name: str) -> bool:
+    """Add a new API key configuration."""
+    if provider not in PROVIDER_CONFIGS:
+        print(colored(f"Unknown provider: {provider}", Colors.RED))
+        print(f"Available providers: {', '.join(PROVIDER_CONFIGS.keys())}")
+        return False
+    
+    keys = load_api_keys()
+    
+    # Store the key
+    if "agents" not in keys:
+        keys["agents"] = {}
+    
+    keys["agents"][name] = {
+        "provider": provider,
+        "api_key": api_key,
+        "model": model,
+        "role": role,
+        "enabled": True,
+    }
+    
+    save_api_keys(keys)
+    print(colored(f"✓ API agent '{name}' added successfully!", Colors.GREEN))
+    return True
+
+
+def remove_api_key(name: str) -> bool:
+    """Remove an API key configuration."""
+    keys = load_api_keys()
+    
+    if "agents" not in keys or name not in keys["agents"]:
+        print(colored(f"Agent '{name}' not found", Colors.RED))
+        return False
+    
+    del keys["agents"][name]
+    save_api_keys(keys)
+    print(colored(f"✓ API agent '{name}' removed", Colors.GREEN))
+    return True
+
+
+def list_api_keys() -> None:
+    """List all configured API agents."""
+    keys = load_api_keys()
+    
+    print(colored("\nConfigured API Agents:", Colors.BOLD))
+    print(colored("=" * 60, Colors.CYAN))
+    
+    if "agents" not in keys or not keys["agents"]:
+        print(colored("  No API agents configured", Colors.YELLOW))
+        print("\nUse 'multi-api add' to add an API agent")
+        return
+    
+    for name, config in keys["agents"].items():
+        status = colored("✓", Colors.GREEN) if config.get("enabled", True) else colored("✗", Colors.RED)
+        provider = config.get("provider", "unknown")
+        model = config.get("model", "unknown")
+        role = config.get("role", "unknown")
+        
+        print(f"\n  {status} {colored(name, Colors.CYAN)}")
+        print(f"      Provider: {provider}")
+        print(f"      Model:    {model}")
+        print(f"      Role:     {role}")
+        
+        # Show available models for this provider
+        available = get_available_models(provider)
+        if available:
+            print(f"      Available models: {', '.join(available[:3])}...")
+    
+    print()
+
+
+def test_api_key(name: str) -> bool:
+    """Test an API key with a simple request."""
+    import asyncio
+    
+    keys = load_api_keys()
+    
+    if "agents" not in keys or name not in keys["agents"]:
+        print(colored(f"Agent '{name}' not found", Colors.RED))
+        return False
+    
+    config = keys["agents"][name]
+    agent = create_api_agent(
+        provider=config["provider"],
+        api_key=config["api_key"],
+        model=config["model"],
+        role=config["role"],
+        name=name,
+    )
+    
+    if not agent:
+        print(colored(f"Failed to create agent for provider {config['provider']}", Colors.RED))
+        return False
+    
+    print(colored(f"\nTesting {name}...", Colors.CYAN))
+    print("Sending test request...")
+    
+    async def test():
+        result = await agent.execute("Write a Python function that adds two numbers")
+        return result
+    
+    result = asyncio.run(test())
+    
+    if result.status == "success":
+        print(colored(f"✓ {name} is working!", Colors.GREEN))
+        print(f"  Response time: {result.execution_time:.2f}s")
+        if result.parsed_output:
+            output = result.parsed_output[:200]
+            print(f"  Sample: {output}...")
+        return True
+    else:
+        print(colored(f"✗ {name} failed: {result.error}", Colors.RED))
+        return False
+
+
+def show_providers() -> None:
+    """Show available API providers and their models."""
+    print(colored("\nAvailable API Providers:", Colors.BOLD))
+    print(colored("=" * 60, Colors.CYAN))
+    
+    for provider, config in PROVIDER_CONFIGS.items():
+        print(f"\n  {colored(provider, Colors.CYAN)}")
+        print(f"  Base URL: {config['base_url'][:50]}...")
+        print(f"  Models:")
+        for model in config.get("models", []):
+            print(f"    - {model}")
+    
+    print()
+    print(colored("To get API keys:", Colors.YELLOW))
+    print("  OpenRouter: https://openrouter.ai/keys")
+    print("  Groq:       https://console.groq.com/keys")
+    print("  Google AI:  https://makersuite.google.com/app/apikey")
+    print("  DeepSeek:   https://platform.deepseek.com/api_keys")
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Interactive Add Command
+# ─────────────────────────────────────────────────────────────────────────────
+def interactive_add() -> None:
+    """Interactive mode to add an API agent."""
+    print(colored("\nAdd API Agent - Interactive Mode", Colors.BOLD))
+    print(colored("=" * 60, Colors.CYAN))
+    print()
+
+    # Show available providers
+    print(colored("Available providers:", Colors.YELLOW))
+    for i, provider in enumerate(PROVIDER_CONFIGS.keys(), 1):
+        print(f"  {i}. {provider}")
+    print()
+
+    # Get provider
+    while True:
+        choice = input("Select provider (name or number): ").strip()
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(PROVIDER_CONFIGS):
+                provider = list(PROVIDER_CONFIGS.keys())[idx]
+                break
+        elif choice in PROVIDER_CONFIGS:
+            provider = choice
+            break
+        print(colored("Invalid provider", Colors.RED))
+
+    # Get API key FIRST (needed to fetch models for OpenRouter)
+    print(f"\n{colored('Enter your API key:', Colors.YELLOW)}")
+    api_key = input("API Key: ").strip()
+    if not api_key:
+        print(colored("API key is required", Colors.RED))
+        return
+
+    # Fetch models dynamically for OpenRouter
+    models = []
+    if provider == "openrouter":
+        print(colored("\nFetching available models from OpenRouter...", Colors.CYAN))
+        models = fetch_openrouter_models(api_key)
+        
+        if models:
+            print(f"{colored(f'Found {len(models)} models:', Colors.GREEN)}")
+            # Show first 20 models
+            display_count = min(20, len(models))
+            for i, model in enumerate(models[:display_count], 1):
+                print(f"  {i}. {model}")
+            if len(models) > 20:
+                print(f"  ... and {len(models) - 20} more (enter custom name)")
+        else:
+            # Fallback to static list
+            models = get_available_models(provider)
+            print(colored("Using fallback model list:", Colors.YELLOW))
+            for i, model in enumerate(models, 1):
+                print(f"  {i}. {model}")
+    else:
+        # For other providers, use static list
+        models = get_available_models(provider)
+        print(f"\n{colored('Available models:', Colors.YELLOW)}")
+        for i, model in enumerate(models, 1):
+            print(f"  {i}. {model}")
+    print()
+
+    # Get model
+    while True:
+        choice = input("Select model (name or number, or enter custom): ").strip()
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(models):
+                model = models[idx]
+                break
+        elif choice:
+            model = choice
+            break
+        print(colored("Invalid model", Colors.RED))
+    
+    # Get role
+    print(f"\n{colored('Agent role:', Colors.YELLOW)}")
+    print("  1. backend  - Backend code generation")
+    print("  2. frontend - Frontend code generation")
+    print("  3. testing  - Test generation")
+    print("  4. planner  - Task planning")
+
+    while True:
+        choice = input("Select role (name or number): ").strip()
+        role_map = {"1": "backend", "2": "frontend", "3": "testing", "4": "planner"}
+        if choice in role_map:
+            role = role_map[choice]
+            break
+        elif choice in ["backend", "frontend", "testing", "planner"]:
+            role = choice
+            break
+        print(colored("Invalid role", Colors.RED))
+
+    # Get agent name
+    default_name = f"{provider}_{role}"
+    name = input(f"Agent name [{default_name}]: ").strip() or default_name
+    
+    # Confirm
+    print()
+    print(colored("Configuration Summary:", Colors.BOLD))
+    print(f"  Provider: {provider}")
+    print(f"  Model:    {model}")
+    print(f"  Role:     {role}")
+    print(f"  Name:     {name}")
+    print()
+    
+    confirm = input("Add this agent? [Y/n]: ").strip().lower()
+    if confirm in ["", "y", "yes"]:
+        if add_api_key(provider, api_key, model, role, name):
+            print()
+            print(colored("Next steps:", Colors.YELLOW))
+            print(f"  1. Test the agent: multi-api test {name}")
+            print(f"  2. Use in orchestrator: The agent will be used as fallback automatically")
+            print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main CLI
+# ─────────────────────────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(
+        prog="multi-api",
+        description="Manage API keys for AI agents",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  multi-api add                    # Interactive add
+  multi-api add openrouter sk-... google/gemini-2.0-flash backend my-gemini
+  multi-api list                   # List all configured agents
+  multi-api test my-gemini         # Test an agent
+  multi-api remove my-gemini       # Remove an agent
+  multi-api providers              # Show available providers
+        """,
+    )
+    
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    
+    # add command
+    add_parser = subparsers.add_parser("add", help="Add a new API agent")
+    add_parser.add_argument("--interactive", "-i", action="store_true", help="Interactive mode")
+    add_parser.add_argument("provider", nargs="?", help="Provider name (openrouter, groq, etc.)")
+    add_parser.add_argument("api_key", nargs="?", help="API key")
+    add_parser.add_argument("model", nargs="?", help="Model name")
+    add_parser.add_argument("role", nargs="?", help="Agent role (backend, frontend, testing, planner)")
+    add_parser.add_argument("--name", help="Agent name (default: {provider}_{role})")
+    
+    # remove command
+    remove_parser = subparsers.add_parser("remove", help="Remove an API agent")
+    remove_parser.add_argument("name", help="Agent name to remove")
+    
+    # list command
+    list_parser = subparsers.add_parser("list", help="List all API agents")
+    
+    # test command
+    test_parser = subparsers.add_parser("test", help="Test an API agent")
+    test_parser.add_argument("name", help="Agent name to test")
+    
+    # providers command
+    providers_parser = subparsers.add_parser("providers", help="Show available providers")
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        return 0
+    
+    if args.command == "add":
+        if args.interactive or not all([args.provider, args.api_key, args.model, args.role]):
+            interactive_add()
+        else:
+            name = args.name or f"{args.provider}_{args.role}"
+            add_api_key(args.provider, args.api_key, args.model, args.role, name)
+    
+    elif args.command == "remove":
+        remove_api_key(args.name)
+    
+    elif args.command == "list":
+        list_api_keys()
+    
+    elif args.command == "test":
+        test_api_key(args.name)
+    
+    elif args.command == "providers":
+        show_providers()
+    
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

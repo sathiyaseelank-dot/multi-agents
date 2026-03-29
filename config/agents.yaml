@@ -240,6 +240,54 @@ agents:
       - Supports database tools: --db flag
       - May share quota with OpenCode provider
 
+  qwen:
+    name: "Qwen"
+    role: "assistant"
+    description: "Code generation and assistance using Qwen models"
+
+    # CLI Invocation
+    command: "qwen"
+    subcommand: null  # Uses positional prompt
+    args:
+      - "--model"
+      - "qwen-coder-plus"
+
+    # Environment
+    env_vars:
+      - name: "QWEN_MODEL"
+        value: "qwen-coder-plus"
+        description: "Model selection (qwen-coder-plus, qwen-max, etc.)"
+
+    # Execution
+    timeout_seconds: 180
+    retry_count: 2
+    retry_backoff_seconds: 5
+
+    # Output
+    output_format: "markdown_with_code_blocks"
+    output_description: |
+      Markdown with code blocks and explanations.
+      Can return JSON when requested.
+
+    # Parsing Strategy
+    parsing:
+      method: "code_block_extraction"
+      fallback: "regex_or_manual"
+      strip_ansi: true
+      extract_language: true
+
+    # Invocation Template
+    invocation_template: |
+      qwen {{prompt}}
+
+    # Notes
+    notes: |
+      ✅ Qwen CLI installed and working
+      - Supports multiple models: qwen-coder-plus, qwen-max, etc.
+      - Good for both backend and frontend tasks
+      - Fast response times on most models
+      - Can be used as fallback for opencode/gemini
+
 # Global Configuration
 global:
   # Output directory for generated artifacts

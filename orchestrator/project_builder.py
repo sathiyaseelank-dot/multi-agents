@@ -294,12 +294,32 @@ def write_files(
     created_files = []
     project_root = next(iter(project_dirs.values())).parent if project_dirs else Path(".")
     manifest_entries = []
+    seen_paths = set()  # Deduplicate across all tasks
 
     for task_id, info in task_results.items():
-        manifest_entries.extend(_normalize_task_result(task_id, info))
+        task_type = info.get("type", "backend")
+        entries = _normalize_task_result(task_id, info)
+        
+        # Sanitize each entry's path
+        for entry in entries:
+            path = entry.get("path", "")
+            # Remove nested project directory prefixes
+            sanitized_path = re.sub(r'^project/\d{8}-\d{6}/', '', path)
+            sanitized_path = re.sub(r'^\./', '', sanitized_path)
+            entry["path"] = sanitized_path
+            
+        manifest_entries.extend(entries)
 
+    # Sort and deduplicate
     for entry in sorted(manifest_entries, key=lambda item: item["path"]):
         rel_path = _safe_relative_path(entry["path"])
+        
+        # Skip if we've already written this path
+        if rel_path in seen_paths:
+            logger.debug(f"Skipping duplicate: {rel_path}")
+            continue
+        seen_paths.add(rel_path)
+        
         filepath = project_root / rel_path
         filepath.parent.mkdir(parents=True, exist_ok=True)
         content = entry.get("content", "")
@@ -505,31 +525,52 @@ def build_project(
 
 
 def _normalize_task_result(task_id: str, info: dict) -> list[dict]:
+    """Normalize task result to list of file artifacts with deduplication."""
     task_type = info.get("type", "backend")
     task_title = info.get("title", task_id)
 
     manifest_files = info.get("files") or []
     normalized = []
+    seen_paths = set()  # Track seen paths to avoid duplicates
+    
     for item in manifest_files:
         path = item.get("path", "")
         content = item.get("content", "")
-        if path and str(content).strip():
-            normalized.append({
-                "path": path,
-                "content": content,
-                "operation": item.get("operation", "create"),
-            })
+        
+        # Skip empty content or duplicate paths
+        if not path or not str(content).strip():
+            continue
+        if path in seen_paths:
+            logger.debug(f"Skipping duplicate file: {path}")
+            continue
+            
+        seen_paths.add(path)
+        normalized.append({
+            "path": path,
+            "content": content,
+            "operation": item.get("operation", "create"),
+        })
 
     if normalized:
         return normalized
 
+    # Fallback to code blocks if no manifest files
     code_blocks = info.get("code_blocks", [])
     target_dir_name = TYPE_TO_DIR.get(task_type, "backend")
+    seen_code_hashes = set()  # Track code content hashes
+    
     for i, block in enumerate(code_blocks):
         lang = block.get("language", "text")
         code = block.get("code", "")
         if not code.strip():
             continue
+            
+        # Skip duplicate code content
+        code_hash = hash(code)
+        if code_hash in seen_code_hashes:
+            logger.debug(f"Skipping duplicate code block in {task_id}")
+            continue
+        seen_code_hashes.add(code_hash)
 
         ext = _get_extension(lang, task_type)
         filename = _infer_filename(code, task_type, task_title)
@@ -543,14 +584,21 @@ def _normalize_task_result(task_id: str, info: dict) -> list[dict]:
             filename = f"test_{filename}"
         if not os.path.splitext(filename)[1]:
             filename = f"{filename}{ext}"
+            
+        path = f"{target_dir_name}/{filename}"
+        
+        # Final dedup check on generated path
+        if path in seen_paths:
+            logger.debug(f"Skipping duplicate generated path: {path}")
+            continue
+            
         normalized.append({
-            "path": f"{target_dir_name}/{filename}",
+            "path": path,
             "content": code,
             "operation": "create",
         })
 
-    if normalized:
-        return normalized
+    return normalized
 
     raw = info.get("raw_text", "")
     if raw:

@@ -1,0 +1,585 @@
+#!/usr/bin/env python3
+"""
+Multi-Agent Orchestrator CLI
+Enhanced command-line interface with navigation, session management, and AI tools.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+# Add project root to path
+PROJECT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from __version__ import __version__, VERSION_DESCRIPTION
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Colors for terminal output
+# ─────────────────────────────────────────────────────────────────────────────
+class Colors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+
+def colored(text: str, color: str) -> str:
+    """Wrap text with ANSI color codes."""
+    return f"{color}{text}{Colors.ENDC}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper Functions
+# ─────────────────────────────────────────────────────────────────────────────
+def get_memory_dir() -> Path:
+    """Get memory directory path."""
+    return PROJECT_ROOT / "memory"
+
+
+def get_logs_dir() -> Path:
+    """Get logs directory path."""
+    return PROJECT_ROOT / "logs"
+
+
+def get_output_dir() -> Path:
+    """Get output directory path."""
+    return PROJECT_ROOT / "output"
+
+
+def get_project_dir() -> Path:
+    """Get project directory path."""
+    return PROJECT_ROOT / "project"
+
+
+def run_orchestrator(args: list[str]) -> int:
+    """Run the orchestrator with given arguments."""
+    cmd = [sys.executable, str(PROJECT_ROOT / "orchestrator" / "main.py")] + args
+    try:
+        result = subprocess.run(cmd, cwd=PROJECT_ROOT)
+        return result.returncode
+    except KeyboardInterrupt:
+        print(colored("\n\n[INFO] Interrupted by user", Colors.WARNING))
+        return 130
+
+
+def check_agent_availability() -> dict[str, bool]:
+    """Check which AI agents are available."""
+    agents = ["codex", "opencode", "gemini", "kilo"]
+    availability = {}
+    for agent in agents:
+        try:
+            subprocess.run(
+                ["which", agent],
+                capture_output=True,
+                check=True,
+                timeout=5
+            )
+            availability[agent] = True
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            availability[agent] = False
+    return availability
+
+
+def format_session_info(data: dict) -> str:
+    """Format session info for display."""
+    sid = data.get("session_id", "Unknown")
+    ts = data.get("timestamp", "Unknown")[:19]
+    epic = data.get("plan", {}).get("epic", "Unknown task")[:60]
+    task_count = len(data.get("plan", {}).get("tasks", []))
+    
+    results_file = get_memory_dir() / f"results-{sid}.json"
+    checkpoint_file = get_memory_dir() / f"checkpoint-{sid}.json"
+    
+    status = colored("✓ COMPLETED", Colors.OKGREEN) if results_file.exists() else colored("○ INCOMPLETE", Colors.WARNING)
+    resumable = colored(" [RESUMABLE]", Colors.OKCYAN) if checkpoint_file.exists() and not results_file.exists() else ""
+    
+    return f"  {sid:20} {ts}  {status}{resumable}\n    └─ {epic} ({task_count} tasks)"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Command Handlers
+# ─────────────────────────────────────────────────────────────────────────────
+def cmd_run(args: argparse.Namespace) -> int:
+    """Run a new orchestration task."""
+    cmd_args = []
+    
+    if args.task:
+        cmd_args.append(args.task)
+    elif args.file:
+        cmd_args.extend(["--file", args.file])
+    else:
+        print(colored("Error: Provide a task description or --file", Colors.FAIL))
+        return 1
+    
+    if args.verbose:
+        cmd_args.append("--verbose")
+    if args.dry_run:
+        cmd_args.append("--dry-run")
+    if args.plan_only:
+        cmd_args.append("--plan-only")
+    if args.self_heal:
+        cmd_args.extend(["--self-heal", "--max-repairs", str(args.max_repairs)])
+    if args.orchestration_heal:
+        cmd_args.extend([
+            "--orchestration-heal",
+            "--health-timeout", str(args.health_timeout),
+            "--max-orch-heals", str(args.max_orch_heals)
+        ])
+    if args.json:
+        cmd_args.append("--json")
+    
+    print(colored(f"\n{VERSION_DESCRIPTION}", Colors.HEADER))
+    print(colored("=" * 60, Colors.HEADER))
+    
+    # Check agents
+    agents = check_agent_availability()
+    available = sum(1 for v in agents.values() if v)
+    print(f"Agents available: {available}/4")
+    for agent, is_available in agents.items():
+        status = colored("✓", Colors.OKGREEN) if is_available else colored("✗", Colors.FAIL)
+        print(f"  {status} {agent}")
+    print()
+    
+    return run_orchestrator(cmd_args)
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    """Resume an interrupted session."""
+    if not args.session_id:
+        # List sessions and prompt
+        sessions = list_sessions_raw()
+        if not sessions:
+            print(colored("No resumable sessions found.", Colors.WARNING))
+            return 1
+        
+        print(colored("\nAvailable sessions:", Colors.HEADER))
+        for i, (sid, data) in enumerate(sessions, 1):
+            checkpoint_file = get_memory_dir() / f"checkpoint-{sid}.json"
+            results_file = get_memory_dir() / f"results-{sid}.json"
+            if checkpoint_file.exists() and not results_file.exists():
+                ts = data.get("timestamp", "Unknown")[:19]
+                epic = data.get("plan", {}).get("epic", "Unknown task")[:50]
+                print(f"  {i}. {sid}  ({ts}) - {epic}")
+        
+        try:
+            choice = input("\nSelect session to resume (number): ").strip()
+            idx = int(choice) - 1
+            if 0 <= idx < len(sessions):
+                args.session_id = sessions[idx][0]
+            else:
+                print(colored("Invalid selection.", Colors.FAIL))
+                return 1
+        except (ValueError, KeyboardInterrupt):
+            print(colored("\nCancelled.", Colors.WARNING))
+            return 1
+    
+    print(colored(f"\nResuming session: {args.session_id}", Colors.OKCYAN))
+    return run_orchestrator(["--resume", args.session_id])
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    """List previous sessions."""
+    sessions = list_sessions_raw()
+    
+    if not sessions:
+        print("No sessions found.")
+        return 0
+    
+    print(colored(f"\nPrevious Sessions ({len(sessions)}):", Colors.HEADER))
+    print("  " + "-" * 70)
+    
+    # Filter by status if requested
+    if args.status:
+        sessions = [
+            (sid, data) for sid, data in sessions
+            if args.status == "completed" and (get_memory_dir() / f"results-{sid}.json").exists()
+            or args.status == "incomplete" and not (get_memory_dir() / f"results-{sid}.json").exists()
+        ]
+    
+    # Limit results
+    if args.limit:
+        sessions = sessions[:args.limit]
+    
+    for sid, data in sessions:
+        print(format_session_info(data))
+    
+    print()
+    return 0
+
+
+def list_sessions_raw() -> list[tuple[str, dict]]:
+    """List sessions as raw data."""
+    mem_path = get_memory_dir()
+    if not mem_path.exists():
+        return []
+    
+    plans = sorted(mem_path.glob("plan-*.json"), reverse=True)
+    sessions = []
+    
+    for plan_file in plans:
+        try:
+            data = json.loads(plan_file.read_text())
+            sid = data.get("session_id", plan_file.stem.replace("plan-", ""))
+            sessions.append((sid, data))
+        except Exception:
+            continue
+    
+    return sessions
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """Show detailed status of a session."""
+    session_id = args.session_id
+    mem_path = get_memory_dir()
+    
+    # Load plan
+    plan_file = mem_path / f"plan-{session_id}.json"
+    if not plan_file.exists():
+        print(colored(f"Session not found: {session_id}", Colors.FAIL))
+        return 1
+    
+    plan_data = json.loads(plan_file.read_text())
+    
+    # Load checkpoint
+    checkpoint_file = mem_path / f"checkpoint-{session_id}.json"
+    checkpoint_data = {}
+    if checkpoint_file.exists():
+        checkpoint_data = json.loads(checkpoint_file.read_text())
+    
+    # Load results
+    results_file = mem_path / f"results-{session_id}.json"
+    results_data = {}
+    has_results = results_file.exists()
+    if has_results:
+        results_data = json.loads(results_file.read_text())
+    
+    # Display
+    print(colored(f"\nSession: {session_id}", Colors.HEADER))
+    print(colored("=" * 60, Colors.HEADER))
+    
+    print(f"\n{colored('Task:', Colors.OKCYAN)} {plan_data.get('plan', {}).get('epic', 'Unknown')}")
+    print(f"{colored('Created:', Colors.OKCYAN)} {plan_data.get('timestamp', 'Unknown')}")
+    
+    status = colored("✓ COMPLETED", Colors.OKGREEN) if has_results else colored("○ INCOMPLETE", Colors.WARNING)
+    print(f"{colored('Status:', Colors.OKCYAN)} {status}")
+    
+    # Task breakdown
+    tasks = plan_data.get("plan", {}).get("tasks", [])
+    print(f"\n{colored(f'Tasks ({len(tasks)}):', Colors.OKCYAN)}")
+    
+    task_states = checkpoint_data.get("task_states", {})
+    for task in tasks:
+        task_id = task.get("id", "Unknown")
+        task_title = task.get("title", "Untitled")
+        task_agent = task.get("agent", "Unknown")
+        
+        state = task_states.get(task_id, {}).get("status", "PENDING")
+        state_color = {
+            "COMPLETED": Colors.OKGREEN,
+            "RUNNING": Colors.OKCYAN,
+            "FAILED": Colors.FAIL,
+            "SKIPPED": Colors.WARNING,
+            "PENDING": Colors.WARNING,
+        }.get(state, Colors.ENDC)
+        
+        print(f"  [{colored(state, state_color)}] {task_id}: {task_title} ({task_agent})")
+    
+    # Results summary
+    if has_results:
+        print(f"\n{colored('Results:', Colors.OKCYAN)}")
+        if results_data.get("project_dir"):
+            print(f"  Project: {results_data['project_dir']}")
+        if results_data.get("validation_result"):
+            val_status = "✓ PASSED" if results_data["validation_result"].get("success") else "✗ FAILED"
+            print(f"  Validation: {val_status}")
+        if results_data.get("runtime_result"):
+            run_status = "✓ PASSED" if results_data["runtime_result"].get("success") else "✗ FAILED"
+            print(f"  Runtime: {run_status}")
+    
+    print()
+    return 0
+
+
+def cmd_clean(args: argparse.Namespace) -> int:
+    """Clean up old sessions and temporary files."""
+    mem_path = get_memory_dir()
+    logs_path = get_logs_dir()
+    output_path = get_output_dir()
+    project_path = get_project_dir()
+    
+    deleted = 0
+    
+    if args.all:
+        # Clean everything
+        for path in [mem_path, logs_path, output_path, project_path]:
+            if path.exists():
+                for item in path.iterdir():
+                    if item.is_file():
+                        item.unlink()
+                        deleted += 1
+                    elif item.is_dir():
+                        subprocess.run(["rm", "-rf", str(item)])
+                        deleted += 1
+        print(colored(f"Cleaned all directories. Removed {deleted} items.", Colors.OKGREEN))
+        return 0
+    
+    # Clean old sessions (older than N days)
+    days = args.days
+    cutoff = datetime.now().timestamp() - (days * 86400)
+    
+    for pattern, dir_path in [
+        ("plan-*.json", mem_path),
+        ("checkpoint-*.json", mem_path),
+        ("results-*.json", mem_path),
+        ("*.log", logs_path),
+    ]:
+        if not dir_path.exists():
+            continue
+        
+        for file in dir_path.glob(pattern):
+            try:
+                # Extract session ID and check age
+                session_id = file.stem.replace("plan-", "").replace("checkpoint-", "").replace("results-", "").replace(".log", "")
+                
+                # Try to parse timestamp from filename
+                try:
+                    session_date = datetime.strptime(session_id[:15], "%Y%m%d-%H%M%S")
+                    if session_date.timestamp() < cutoff:
+                        file.unlink()
+                        deleted += 1
+                except ValueError:
+                    # Can't parse, skip
+                    pass
+            except Exception:
+                continue
+    
+    print(colored(f"Cleaned {deleted} old files (older than {days} days).", Colors.OKGREEN))
+    return 0
+
+
+def cmd_agents(args: argparse.Namespace) -> int:
+    """Check agent availability."""
+    agents = check_agent_availability()
+    
+    print(colored("\nAgent Availability:", Colors.HEADER))
+    print(colored("=" * 40, Colors.HEADER))
+    
+    for agent, is_available in agents.items():
+        if is_available:
+            print(f"  {colored('✓', Colors.OKGREEN)} {colored(agent, Colors.OKGREEN)} - Available")
+        else:
+            print(f"  {colored('✗', Colors.FAIL)} {colored(agent, Colors.FAIL)} - Not installed")
+    
+    available = sum(1 for v in agents.values() if v)
+    print(f"\n{available}/4 agents available")
+    
+    if available < 4:
+        print(colored("\nNote: Missing agents will use fallback routing.", Colors.WARNING))
+    
+    print()
+    return 0
+
+
+def cmd_quick(args: argparse.Namespace) -> int:
+    """Quick run with common presets."""
+    preset = args.preset
+    
+    presets = {
+        "plan": ["--plan-only"],
+        "test": ["--dry-run", "--verbose"],
+        "heal": ["--self-heal", "--max-repairs", "3"],
+        "full": [],
+    }
+    
+    if preset not in presets:
+        print(colored(f"Unknown preset: {preset}", Colors.FAIL))
+        print(f"Available: {', '.join(presets.keys())}")
+        return 1
+    
+    cmd_args = presets[preset] + [args.task]
+    
+    print(colored(f"\nRunning '{preset}' preset...", Colors.OKCYAN))
+    return run_orchestrator(cmd_args)
+
+
+def cmd_info(args: argparse.Namespace) -> int:
+    """Show project information."""
+    print(colored(f"\n{VERSION_DESCRIPTION}", Colors.HEADER))
+    print(colored("=" * 60, Colors.HEADER))
+    
+    print(f"\n{colored('Location:', Colors.OKCYAN)} {PROJECT_ROOT}")
+    print(f"{colored('Version:', Colors.OKCYAN)} {__version__}")
+    
+    # Count files
+    py_files = len(list(PROJECT_ROOT.glob("**/*.py")))
+    test_files = len(list((PROJECT_ROOT / "tests").glob("test_*.py"))) if (PROJECT_ROOT / "tests").exists() else 0
+    
+    print(f"{colored('Python files:', Colors.OKCYAN)} {py_files}")
+    print(f"{colored('Test files:', Colors.OKCYAN)} {test_files}")
+    
+    # Check directories
+    dirs = {
+        "memory": get_memory_dir(),
+        "logs": get_logs_dir(),
+        "output": get_output_dir(),
+        "project": get_project_dir(),
+    }
+    
+    print(f"\n{colored('Directories:', Colors.OKCYAN)}")
+    for name, path in dirs.items():
+        count = len(list(path.glob("*"))) if path.exists() else 0
+        print(f"  {name:12} {count} files")
+    
+    # Agent status
+    agents = check_agent_availability()
+    print(f"\n{colored('Agents:', Colors.OKCYAN)}")
+    for agent, available in agents.items():
+        status = colored("✓", Colors.OKGREEN) if available else colored("✗", Colors.FAIL)
+        print(f"  {status} {agent}")
+    
+    print()
+    return 0
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    """Search across sessions using ripgrep."""
+    query = args.query
+    
+    # Check if rg is available
+    try:
+        subprocess.run(["rg", "--version"], capture_output=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print(colored("Error: ripgrep (rg) not found. Install with: sudo apt install ripgrep", Colors.FAIL))
+        return 1
+    
+    # Search in memory, logs, output
+    search_dirs = []
+    if args.memory and get_memory_dir().exists():
+        search_dirs.append(str(get_memory_dir()))
+    if args.logs and get_logs_dir().exists():
+        search_dirs.append(str(get_logs_dir()))
+    if args.output and get_output_dir().exists():
+        search_dirs.append(str(get_output_dir()))
+    
+    if not search_dirs:
+        search_dirs = [str(get_memory_dir())]
+    
+    cmd = ["rg", "--color", "always", "--line-number", "--context", "2"]
+    
+    if args.json_only:
+        cmd.extend(["--type", "json"])
+    
+    cmd.extend([query] + search_dirs)
+    
+    result = subprocess.run(cmd)
+    return result.returncode
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main CLI
+# ─────────────────────────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(
+        prog="multi-cli",
+        description="Multi-Agent Orchestrator - Enhanced CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  multi run "Build a REST API"
+  multi run "Build a login system" --self-heal
+  multi resume
+  multi list --status completed
+  multi status 20260329-101850
+  multi agents
+  multi search "authentication" --memory
+  multi quick plan "Build a todo app"
+  multi clean --days 7
+  multi info
+        """,
+    )
+    
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    
+    # run command
+    run_parser = subparsers.add_parser("run", help="Run a new orchestration task")
+    run_parser.add_argument("task", nargs="?", help="Task description")
+    run_parser.add_argument("--file", "-f", help="Read task from file")
+    run_parser.add_argument("--verbose", "-v", action="store_true")
+    run_parser.add_argument("--dry-run", action="store_true")
+    run_parser.add_argument("--plan-only", action="store_true")
+    run_parser.add_argument("--self-heal", action="store_true")
+    run_parser.add_argument("--max-repairs", type=int, default=5)
+    run_parser.add_argument("--orchestration-heal", action="store_true")
+    run_parser.add_argument("--health-timeout", type=float, default=60.0)
+    run_parser.add_argument("--max-orch-heals", type=int, default=3)
+    run_parser.add_argument("--json", action="store_true")
+    run_parser.set_defaults(func=cmd_run)
+    
+    # resume command
+    resume_parser = subparsers.add_parser("resume", help="Resume an interrupted session")
+    resume_parser.add_argument("session_id", nargs="?", help="Session ID to resume")
+    resume_parser.set_defaults(func=cmd_resume)
+    
+    # list command
+    list_parser = subparsers.add_parser("list", help="List previous sessions")
+    list_parser.add_argument("--status", choices=["completed", "incomplete"], help="Filter by status")
+    list_parser.add_argument("--limit", "-n", type=int, help="Limit results")
+    list_parser.set_defaults(func=cmd_list)
+    
+    # status command
+    status_parser = subparsers.add_parser("status", help="Show detailed session status")
+    status_parser.add_argument("session_id", help="Session ID")
+    status_parser.set_defaults(func=cmd_status)
+    
+    # clean command
+    clean_parser = subparsers.add_parser("clean", help="Clean up old sessions")
+    clean_parser.add_argument("--all", action="store_true", help="Clean everything")
+    clean_parser.add_argument("--days", "-d", type=int, default=30, help="Remove files older than N days")
+    clean_parser.set_defaults(func=cmd_clean)
+    
+    # agents command
+    agents_parser = subparsers.add_parser("agents", help="Check agent availability")
+    agents_parser.set_defaults(func=cmd_agents)
+    
+    # quick command
+    quick_parser = subparsers.add_parser("quick", help="Quick run with presets")
+    quick_parser.add_argument("preset", choices=["plan", "test", "heal", "full"], help="Preset to use")
+    quick_parser.add_argument("task", help="Task description")
+    quick_parser.set_defaults(func=cmd_quick)
+    
+    # info command
+    info_parser = subparsers.add_parser("info", help="Show project information")
+    info_parser.set_defaults(func=cmd_info)
+    
+    # search command
+    search_parser = subparsers.add_parser("search", help="Search across sessions")
+    search_parser.add_argument("query", help="Search query")
+    search_parser.add_argument("--memory", action="store_true", help="Search in memory/")
+    search_parser.add_argument("--logs", action="store_true", help="Search in logs/")
+    search_parser.add_argument("--output", action="store_true", help="Search in output/")
+    search_parser.add_argument("--json-only", action="store_true", help="Search only JSON files")
+    search_parser.set_defaults(func=cmd_search)
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        return 0
+    
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

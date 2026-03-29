@@ -1,0 +1,594 @@
+#!/usr/bin/env python3
+"""
+Multi-Agent Interactive CLI
+Chat with AI agents directly in your terminal - like Gemini CLI or Codex CLI.
+With real-time streaming output support.
+"""
+
+import asyncio
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+# Add project root to path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from agents.planner import PlannerAgent
+from agents.backend import BackendAgent
+from agents.frontend import FrontendAgent
+from agents.tester import TesterAgent
+from agents.qwen import QwenAgent
+from __version__ import __version__
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Colors
+# ─────────────────────────────────────────────────────────────────────────────
+class Colors:
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    ENDC = '\033[0m'
+
+
+def colored(text: str, color: str) -> str:
+    return f"{color}{text}{Colors.ENDC}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent Selector
+# ─────────────────────────────────────────────────────────────────────────────
+AGENT_REGISTRY = {
+    "codex": {"class": PlannerAgent, "role": "Planner", "desc": "Plan & decompose tasks"},
+    "opencode": {"class": BackendAgent, "role": "Backend", "desc": "Backend code generation"},
+    "gemini": {"class": FrontendAgent, "role": "Frontend", "desc": "Frontend code generation"},
+    "kilo": {"class": TesterAgent, "role": "Tester", "desc": "Test generation"},
+    "qwen": {"class": QwenAgent, "role": "Assistant", "desc": "Code generation & assistance"},
+}
+
+
+def check_agents() -> dict[str, bool]:
+    """Check which agents are available."""
+    import subprocess
+    available = {}
+    for agent in AGENT_REGISTRY.keys():
+        try:
+            subprocess.run(["which", agent], capture_output=True, check=True, timeout=3)
+            available[agent] = True
+        except Exception:
+            available[agent] = False
+    return available
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Animated Thinking Indicator
+# ─────────────────────────────────────────────────────────────────────────────
+class ThinkingIndicator:
+    """Animated thinking indicator."""
+    
+    def __init__(self):
+        self.frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.frame_idx = 0
+        self.running = False
+        self.task = None
+    
+    async def animate(self):
+        """Display animated indicator."""
+        while self.running:
+            sys.stdout.write(f'\r{colored(self.frames[self.frame_idx], Colors.CYAN)} {colored("Thinking...", Colors.YELLOW)}')
+            sys.stdout.flush()
+            self.frame_idx = (self.frame_idx + 1) % len(self.frames)
+            await asyncio.sleep(0.1)
+
+    async def start(self):
+        """Start the animation."""
+        self.running = True
+        self.task = asyncio.create_task(self.animate())
+
+    async def stop(self, final_char: str = '✓'):
+        """Stop the animation."""
+        self.running = False
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+        sys.stdout.write(f'\r{colored(final_char, Colors.GREEN)} Done!\n')
+        sys.stdout.flush()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Interactive CLI
+# ─────────────────────────────────────────────────────────────────────────────
+class MultiAgentCLI:
+    def __init__(self):
+        self.current_agent: Optional[str] = None
+        self.agent_instance = None
+        self.session_history = []
+        self.available_agents = check_agents()
+        self.streaming_enabled = True  # Default to streaming mode
+        self.thinking = ThinkingIndicator()
+
+    def print_banner(self):
+        print(colored(f"\n{'='*60}", Colors.CYAN))
+        print(colored(f"  Multi-Agent CLI v{__version__}", Colors.BOLD))
+        print(colored(f"  Interactive AI Development Assistant", Colors.CYAN))
+        print(colored(f"{'='*60}", Colors.CYAN))
+        print()
+
+        # Show available agents
+        print(colored("Available Agents:", Colors.BOLD))
+        for name, info in AGENT_REGISTRY.items():
+            status = colored("✓", Colors.GREEN) if self.available_agents.get(name) else colored("✗", Colors.RED)
+            print(f"  {status} {colored(name, Colors.CYAN):12} - {info['role']}: {info['desc']}")
+        print()
+
+        # Show commands
+        print(colored("Commands:", Colors.BOLD))
+        print(f"  {colored('/help', Colors.YELLOW)}       - Show this help")
+        print(f"  {colored('/agent <name>', Colors.YELLOW)} - Switch agent")
+        print(f"  {colored('/stream', Colors.YELLOW)}     - Toggle streaming mode")
+        print(f"  {colored('/run', Colors.YELLOW)}        - Execute orchestrator with task")
+        print(f"  {colored('/agents', Colors.YELLOW)}     - List available agents")
+        print(f"  {colored('/clear', Colors.YELLOW)}      - Clear conversation history")
+        print(f"  {colored('/save <file>', Colors.YELLOW)} - Save conversation to file")
+        print(f"  {colored('/quit', Colors.YELLOW)}       - Exit")
+        print()
+        stream_status = colored("ON", Colors.GREEN) if self.streaming_enabled else colored("OFF", Colors.YELLOW)
+        print(colored(f"Streaming: {stream_status}", Colors.BOLD))
+        print(colored("Type your message and press Enter to chat with the current agent.", Colors.GREEN))
+        print(colored("Use /run to execute the full orchestrator pipeline.", Colors.GREEN))
+        print(colored(f"{'='*60}\n", Colors.CYAN))
+
+    def print_help(self):
+        print(colored("\nMulti-Agent CLI Help", Colors.BOLD))
+        print(colored("=" * 40, Colors.CYAN))
+        print()
+        print(colored("Slash Commands:", Colors.YELLOW))
+        print("  /help              - Show this help message")
+        print("  /agent <name>      - Switch to a different agent")
+        print("                     - Available: codex, opencode, gemini, kilo, qwen")
+        print("  /stream            - Toggle real-time streaming")
+        print("                     - /stream on   - Enable streaming (default)")
+        print("                     - /stream off  - Wait for complete response")
+        print("  /run [task]        - Run the full orchestrator pipeline")
+        print("                     - Executes all agents to generate code")
+        print("  /agents            - List all available agents and their status")
+        print("  /clear             - Clear conversation history")
+        print("  /save <filename>   - Save conversation to a file")
+        print("  /history           - Show conversation history")
+        print("  /quit or /exit     - Exit the CLI")
+        print()
+        print(colored("Streaming Mode:", Colors.YELLOW))
+        print("  When enabled, you'll see AI output in real-time as it's generated.")
+        print("  This is like watching ChatGPT type its response.")
+        print()
+        print(colored("Full Pipeline Execution:", Colors.YELLOW))
+        print("  Use /run to execute the complete orchestrator:")
+        print("  1. Codex plans the tasks")
+        print("  2. OpenCode builds backend")
+        print("  3. Gemini builds frontend")
+        print("  4. Kilo writes tests")
+        print("  5. Code is written to output/")
+        print()
+        print(colored("Usage Examples:", Colors.YELLOW))
+        print('  "Plan a REST API with user authentication"')
+        print('  "Create a Flask endpoint for user login"')
+        print('  "Generate React component for a login form"')
+        print('  "Write pytest tests for the auth module"')
+        print('  /run "Build a login system"')
+        print()
+
+    def list_agents(self):
+        print(colored("\nAgent Status:", Colors.BOLD))
+        print(colored("-" * 40, Colors.CYAN))
+
+        for name, info in AGENT_REGISTRY.items():
+            status = colored("✓ Available", Colors.GREEN) if self.available_agents.get(name) else colored("✗ Not installed", Colors.RED)
+            current = colored(" [CURRENT]", Colors.YELLOW) if name == self.current_agent else ""
+            print(f"  {name:12} - {info['role']:10} {status}{current}")
+
+        print()
+        if not any(self.available_agents.values()):
+            print(colored("Warning: No agents available! Install at least one.", Colors.RED))
+            print("  - Codex: https://github.com/openai/codex")
+            print("  - OpenCode: https://github.com/opencode-ai/opencode")
+            print("  - Gemini: https://github.com/google/gemini-cli")
+            print("  - Kilo: https://github.com/kilo-ai/kilo")
+            print()
+
+    def toggle_stream(self, arg: str = ""):
+        """Toggle streaming mode."""
+        if arg.lower() == 'on':
+            self.streaming_enabled = True
+            print(colored("\n✓ Streaming enabled - You'll see AI output in real-time", Colors.GREEN))
+        elif arg.lower() == 'off':
+            self.streaming_enabled = False
+            print(colored("\n✓ Streaming disabled - Will wait for complete responses", Colors.GREEN))
+        else:
+            self.streaming_enabled = not self.streaming_enabled
+            status = colored("ON", Colors.GREEN) if self.streaming_enabled else colored("OFF", Colors.YELLOW)
+            print(colored(f"\n✓ Streaming is now {status}", Colors.GREEN))
+        
+        print()
+
+    def switch_agent(self, agent_name: str):
+        agent_name = agent_name.lower().strip()
+
+        if agent_name not in AGENT_REGISTRY:
+            print(colored(f"Unknown agent: {agent_name}", Colors.RED))
+            print(f"Available: {', '.join(AGENT_REGISTRY.keys())}")
+            return False
+
+        if not self.available_agents.get(agent_name):
+            print(colored(f"Agent '{agent_name}' is not installed.", Colors.RED))
+            return False
+
+        self.current_agent = agent_name
+        self.agent_instance = AGENT_REGISTRY[agent_name]["class"]()
+
+        print(colored(f"\n✓ Switched to {colored(agent_name, Colors.CYAN)} ({AGENT_REGISTRY[agent_name]['role']})", Colors.GREEN))
+        print(f"  {AGENT_REGISTRY[agent_name]['desc']}")
+        print()
+        return True
+
+    def save_conversation(self, filename: str):
+        try:
+            with open(filename, 'w') as f:
+                for entry in self.session_history:
+                    f.write(f"{entry['role']}: {entry['message']}\n\n")
+            print(colored(f"✓ Conversation saved to {filename}", Colors.GREEN))
+        except Exception as e:
+            print(colored(f"Error saving: {e}", Colors.RED))
+
+    def show_history(self):
+        if not self.session_history:
+            print(colored("\n(No conversation history)", Colors.YELLOW))
+            return
+
+        print(colored("\nConversation History:", Colors.BOLD))
+        print(colored("-" * 40, Colors.CYAN))
+        for entry in self.session_history:
+            role_color = {
+                "You": Colors.GREEN,
+                "Assistant": Colors.CYAN,
+                "System": Colors.YELLOW,
+            }.get(entry['role'], Colors.ENDC)
+            print(f"{colored(entry['role'] + ':', role_color)} {entry['message'][:100]}{'...' if len(entry['message']) > 100 else ''}")
+        print()
+
+    async def stream_agent_response(self, message: str):
+        """Stream agent response in real-time using subprocess."""
+        if not self.agent_instance:
+            print(colored("No agent selected. Use /agent <name> to select one.", Colors.RED))
+            return
+
+        # Build the command
+        cmd = self.agent_instance.build_command(message)
+        env = os.environ.copy()
+        env.update(self.agent_instance.config.env_vars)
+
+        # Start thinking indicator
+        await self.thinking.start()
+
+        start_time = time.time()
+        output_lines = []
+        in_code_block = False
+        code_block_started = False
+
+        try:
+            # Create subprocess with streaming stdout
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+            )
+
+            # Stop thinking indicator once we start getting output
+            await self.thinking.stop()
+
+            # Print streaming header
+            print(colored(f"\n⚡ Streaming from {self.current_agent}...", Colors.CYAN))
+            print(colored("━" * 60, Colors.CYAN))
+
+            # Stream output line by line
+            if proc.stdout:
+                async for line in proc.stdout:
+                    decoded_line = line.decode('utf-8', errors='replace')
+                    output_lines.append(decoded_line)
+
+                    # Track code blocks for coloring
+                    if '```' in decoded_line:
+                        if not in_code_block:
+                            in_code_block = True
+                            code_block_started = True
+                            print(colored(decoded_line, Colors.GREEN), end='')
+                        else:
+                            in_code_block = False
+                            print(colored(decoded_line, Colors.GREEN), end='')
+                    elif in_code_block or code_block_started:
+                        # Inside code block - show in green
+                        print(colored(decoded_line, Colors.GREEN), end='')
+                    else:
+                        # Regular text - show in cyan (reasoning)
+                        print(colored(decoded_line, Colors.CYAN), end='')
+
+                    sys.stdout.flush()
+
+            # Wait for process to complete
+            await proc.wait()
+
+            elapsed = time.time() - start_time
+            full_output = ''.join(output_lines)
+
+            print(colored("━" * 60, Colors.CYAN))
+            print(colored(f"✓ Done in {elapsed:.1f}s", Colors.GREEN))
+            print()
+
+            # Parse and save to history
+            parsed = self.agent_instance.parse_output(full_output)
+            self.session_history.append({"role": "You", "message": message})
+            self.session_history.append({
+                "role": f"{self.current_agent.capitalize()}",
+                "message": str(parsed or full_output)[:500]
+            })
+
+            return full_output, parsed
+
+        except Exception as e:
+            await self.thinking.stop('✗')
+            print(colored(f"\nError: {e}", Colors.RED))
+            return None, None
+
+    async def chat_wait_mode(self, message: str):
+        """Chat in wait mode - wait for complete response."""
+        if not self.agent_instance:
+            print(colored("No agent selected. Use /agent <name> to select one.", Colors.RED))
+            return
+
+        print(colored("\nThinking...", Colors.YELLOW))
+
+        start_time = time.time()
+        try:
+            result = await self.agent_instance.execute(message)
+            elapsed = time.time() - start_time
+
+            print()
+            print(colored("━" * 60, Colors.CYAN))
+
+            if hasattr(result, 'parsed_output') and result.parsed_output:
+                if self.current_agent == "codex":
+                    self._format_planner_response(result.parsed_output)
+                else:
+                    self._format_code_response(result.raw_output)
+            else:
+                print(result.raw_output[:2000] if result.raw_output else "No response")
+
+            print(colored("━" * 60, Colors.CYAN))
+            print(colored(f"✓ Done in {elapsed:.1f}s", Colors.GREEN))
+            print()
+
+            self.session_history.append({"role": "You", "message": message})
+            self.session_history.append({
+                "role": f"{self.current_agent.capitalize()}",
+                "message": str(result.parsed_output or result.raw_output)[:500]
+            })
+
+        except Exception as e:
+            print(colored(f"Error: {e}", Colors.RED))
+
+    async def run_orchestrator(self, task: str):
+        """Run the full orchestrator pipeline."""
+        if not task:
+            print(colored("Usage: /run <task description>", Colors.YELLOW))
+            print('Example: /run "Build a login system with JWT auth"')
+            return
+
+        print(colored("\n" + "=" * 60, Colors.BOLD))
+        print(colored("  Running Full Orchestrator Pipeline", Colors.CYAN))
+        print(colored("=" * 60, Colors.ENDC))
+        print()
+        print(colored("This will:", Colors.YELLOW))
+        print("  1. Plan tasks with Codex")
+        print("  2. Execute backend tasks with OpenCode")
+        print("  3. Execute frontend tasks with Gemini")
+        print("  4. Write tests with Kilo")
+        print("  5. Generate code files in output/")
+        print()
+
+        # Run the orchestrator
+        orchestrator_path = PROJECT_ROOT / "orchestrator" / "main.py"
+        cmd = [sys.executable, str(orchestrator_path), task]
+
+        print(colored(f"Executing: {' '.join(cmd)}", Colors.CYAN))
+        print(colored("-" * 60, Colors.CYAN))
+        print()
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+
+            if proc.stdout:
+                async for line in proc.stdout:
+                    decoded = line.decode('utf-8', errors='replace')
+                    # Color-code orchestrator output
+                    if "ERROR" in decoded or "FAILED" in decoded:
+                        print(colored(decoded, Colors.RED), end='')
+                    elif "COMPLETED" in decoded or "SUCCESS" in decoded:
+                        print(colored(decoded, Colors.GREEN), end='')
+                    elif "Phase" in decoded or "task-" in decoded:
+                        print(colored(decoded, Colors.CYAN), end='')
+                    # Color-code patch output (git diff style)
+                    elif "[PATCH APPLIED]" in decoded:
+                        print(colored(decoded, Colors.GREEN), end='')
+                    elif decoded.startswith("--- a/"):
+                        print(colored(decoded, Colors.RED), end='')  # Red for old file
+                    elif decoded.startswith("+++ b/"):
+                        print(colored(decoded, Colors.GREEN), end='')  # Green for new file
+                    elif decoded.startswith("@@"):
+                        print(colored(decoded, Colors.CYAN), end='')  # Cyan for hunk header
+                    elif decoded.startswith('-') and not decoded.startswith('---'):
+                        print(colored(decoded, Colors.RED), end='')  # Red for removed lines
+                    elif decoded.startswith('+') and not decoded.startswith('+++'):
+                        print(colored(decoded, Colors.GREEN), end='')  # Green for added lines
+                    else:
+                        print(decoded, end='')
+                    sys.stdout.flush()
+
+            await proc.wait()
+
+            print()
+            print(colored("-" * 60, Colors.CYAN))
+            if proc.returncode == 0:
+                print(colored("✓ Orchestrator completed successfully!", Colors.GREEN))
+            else:
+                print(colored(f"✗ Orchestrator exited with code {proc.returncode}", Colors.RED))
+            print()
+
+        except Exception as e:
+            print(colored(f"Error running orchestrator: {e}", Colors.RED))
+
+    async def chat(self, message: str):
+        """Send message to current agent and get response."""
+        if not self.agent_instance:
+            print(colored("No agent selected. Use /agent <name> to select one.", Colors.RED))
+            return
+
+        if self.streaming_enabled:
+            await self.stream_agent_response(message)
+        else:
+            await self.chat_wait_mode(message)
+
+    def _format_planner_response(self, data: dict):
+        """Format planner (Codex) JSON response."""
+        if isinstance(data, dict):
+            epic = data.get('epic', 'Unknown task')
+            print(colored(f"Epic: {epic}", Colors.BOLD))
+            print()
+
+            tasks = data.get('tasks', data.get('subtasks', []))
+            if tasks:
+                print(colored(f"Tasks ({len(tasks)}):", Colors.BOLD))
+                for i, task in enumerate(tasks, 1):
+                    task_id = task.get('id', f'{i}')
+                    title = task.get('title', 'Untitled')
+                    agent = task.get('agent', 'Unknown')
+                    print(f"  {colored(f'{i}.', Colors.CYAN)} [{agent}] {title}")
+
+            phases = data.get('phases', [])
+            if phases:
+                print(colored(f"\nPhases: {len(phases)}", Colors.BOLD))
+                for i, phase in enumerate(phases, 1):
+                    print(f"  Phase {i}: {len(phase)} tasks")
+
+    def _format_code_response(self, output: str):
+        """Format code generation response."""
+        code_blocks = re.findall(r'```(\w+)?\n(.*?)```', output, re.DOTALL)
+
+        if code_blocks:
+            for i, (lang, code) in enumerate(code_blocks, 1):
+                print(colored(f"Code Block {i} ({lang or 'text'}):", Colors.BOLD))
+                lines = code.strip().split('\n')
+                for line in lines[:50]:
+                    print(f"  {line}")
+                if len(lines) > 50:
+                    print(colored(f"  ... ({len(lines) - 50} more lines)", Colors.YELLOW))
+                print()
+        else:
+            print(output[:2000])
+
+    async def run(self):
+        """Main interactive loop."""
+        self.print_banner()
+
+        # Auto-select first available agent
+        for name in AGENT_REGISTRY.keys():
+            if self.available_agents.get(name):
+                self.switch_agent(name)
+                break
+
+        if not self.current_agent:
+            print(colored("No agents available. Install at least one AI agent CLI.", Colors.RED))
+            print("Type /agents for more info.")
+
+        while True:
+            try:
+                agent_prompt = colored(f"{self.current_agent or 'none'}", Colors.CYAN) if self.current_agent else colored("no-agent", Colors.RED)
+                user_input = input(f"\n{agent_prompt} {colored('»', Colors.GREEN)} ").strip()
+
+                if not user_input:
+                    continue
+
+                # Handle slash commands
+                if user_input.startswith('/'):
+                    parts = user_input.split(maxsplit=1)
+                    cmd = parts[0].lower()
+                    args = parts[1] if len(parts) > 1 else ""
+
+                    if cmd in ['/quit', '/exit']:
+                        print(colored("\nGoodbye!\n", Colors.CYAN))
+                        break
+                    elif cmd == '/help':
+                        self.print_help()
+                    elif cmd == '/agent':
+                        if args:
+                            self.switch_agent(args)
+                        else:
+                            print("Usage: /agent <name>")
+                            self.list_agents()
+                    elif cmd == '/stream':
+                        self.toggle_stream(args)
+                    elif cmd == '/run':
+                        await self.run_orchestrator(args if args else "")
+                    elif cmd == '/agents':
+                        self.list_agents()
+                    elif cmd == '/clear':
+                        self.session_history = []
+                        print(colored("✓ Conversation history cleared", Colors.GREEN))
+                    elif cmd == '/save':
+                        if args:
+                            self.save_conversation(args)
+                        else:
+                            print("Usage: /save <filename>")
+                    elif cmd == '/history':
+                        self.show_history()
+                    else:
+                        print(colored(f"Unknown command: {cmd}", Colors.RED))
+                        print("Type /help for available commands")
+                    continue
+
+                # Send to agent
+                await self.chat(user_input)
+
+            except KeyboardInterrupt:
+                print(colored("\n\nInterrupted. Type /quit to exit.\n", Colors.YELLOW))
+            except EOFError:
+                print(colored("\n\nGoodbye!\n", Colors.CYAN))
+                break
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+async def main():
+    cli = MultiAgentCLI()
+    await cli.run()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

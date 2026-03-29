@@ -19,9 +19,12 @@ from .context_accumulator import ContextAccumulator
 from .project_builder import build_project
 from .repair_engine import (
     build_repair_prompt,
+    build_patch_prompt,
     choose_repair_agent,
     classify_error,
     collect_relevant_files,
+    should_use_patching,
+    extract_patch_target,
 )
 from .goal_analyzer import analyze_goal, analyze_goal_with_learning
 from .memory_store import MemoryStore
@@ -49,6 +52,10 @@ from agents.backend import BackendAgent
 from agents.frontend import FrontendAgent
 from agents.tester import TesterAgent
 from agents.evaluator import EvaluatorAgent
+from agents.qwen import QwenAgent
+from agents.patcher import PatcherAgent
+from agents.code_reviewer import CodeReviewerAgent
+from agents.api_agent import create_api_agent, load_api_keys
 from agents.base_agent import AgentConfig
 from __version__ import VERSION_DESCRIPTION
 
@@ -63,7 +70,13 @@ AGENT_REGISTRY = {
     "opencode": BackendAgent,
     "gemini": FrontendAgent,
     "kilo": TesterAgent,
+    "qwen": QwenAgent,
+    "patcher": PatcherAgent,
+    "code_reviewer": CodeReviewerAgent,
 }
+
+# API agents will be loaded dynamically from config/api_keys.json
+API_AGENTS = {}
 
 
 class Orchestrator:
@@ -120,6 +133,9 @@ class Orchestrator:
             summary_only=summary_only,
         )
         self._agent_configs = load_agent_configs()
+        
+        # Load API agents from configuration
+        self._load_api_agents()
 
         # Initialize learning components
         self.memory_store = MemoryStore(memory_dir=memory_dir)
@@ -156,6 +172,7 @@ class Orchestrator:
         self.planner = self._build_planner()
         self.reviewer = self._build_reviewer()
         self.evaluator = self._build_evaluator()
+        self.code_reviewer = self._build_code_reviewer()
         self.project_dir = str(Path("project") / self.session_id)
         self.context.set_workspace_root(self.project_dir)
         self.session_log_dir = Path(self.log_dir) / self.session_id
@@ -220,6 +237,10 @@ class Orchestrator:
             )
         return EvaluatorAgent()
 
+    def _build_code_reviewer(self) -> CodeReviewerAgent:
+        """Build the code reviewer from loaded config."""
+        return CodeReviewerAgent()
+
     def _ensure_dirs(self):
         Path(self.log_dir).mkdir(parents=True, exist_ok=True)
         Path(self.memory_dir).mkdir(parents=True, exist_ok=True)
@@ -230,6 +251,11 @@ class Orchestrator:
 
     def _get_agent(self, agent_name: str):
         """Get or create an agent instance by name, using loaded config."""
+        # Check API agents first
+        if agent_name in API_AGENTS:
+            return API_AGENTS[agent_name]
+        
+        # Check CLI-based agents
         if agent_name not in self._agents:
             cls = AGENT_REGISTRY.get(agent_name)
             if cls is None:
@@ -255,6 +281,8 @@ class Orchestrator:
     def _check_agents(self) -> list[str]:
         """Check which agents are available. Returns list of unavailable agent names."""
         unavailable = []
+        
+        # Check CLI-based agents
         for name in AGENT_REGISTRY:
             try:
                 agent = self._get_agent(name)
@@ -262,7 +290,49 @@ class Orchestrator:
                     unavailable.append(name)
             except Exception:
                 unavailable.append(name)
+        
+        # Check API-based agents
+        for name, agent in API_AGENTS.items():
+            try:
+                if not agent.is_available():
+                    unavailable.append(name)
+            except Exception:
+                unavailable.append(name)
+        
         return unavailable
+    
+    def _load_api_agents(self) -> None:
+        """Load API agents from configuration."""
+        global API_AGENTS
+        
+        keys = load_api_keys()
+        API_AGENTS = {}
+        
+        if "agents" not in keys:
+            logger.debug("No API agents configured")
+            return
+        
+        for name, config in keys["agents"].items():
+            if not config.get("enabled", True):
+                logger.debug(f"API agent {name} is disabled")
+                continue
+            
+            try:
+                agent = create_api_agent(
+                    provider=config["provider"],
+                    api_key=config["api_key"],
+                    model=config["model"],
+                    role=config["role"],
+                    name=name,
+                )
+                if agent:
+                    API_AGENTS[name] = agent
+                    logger.info(f"Loaded API agent: {name} ({config['provider']}/{config['model']})")
+            except Exception as e:
+                logger.warning(f"Failed to load API agent {name}: {e}")
+        
+        if API_AGENTS:
+            logger.info(f"Loaded {len(API_AGENTS)} API agents")
 
     async def resume(self) -> dict:
         """Resume a previously interrupted session from checkpoint."""
@@ -483,6 +553,23 @@ class Orchestrator:
                 raise RuntimeError("Runtime execution failed after 3 repair attempts")
             self._evaluation_result = await self._evaluate_project(summary)
 
+            # Phase: Code Review (NEW - analyzes for bugs and quality issues)
+            self.state_machine.transition(State.CODE_REVIEW)
+            self._code_review_result = await self._review_code(task_description)
+            if self._code_review_result:
+                critical_issues = [
+                    i for i in self._code_review_result.get("issues", [])
+                    if i.get("severity") in ["critical", "high"]
+                ]
+                if critical_issues:
+                    self.events.emit(
+                        EventType.WARNING,
+                        {
+                            "message": f"Code review found {len(critical_issues)} critical/high severity issues",
+                            "detail": "See code_review_result for details",
+                        },
+                    )
+
             self.state_machine.transition(State.COMPLETED)
             self._store_run_memory()
             self.events.emit(
@@ -494,6 +581,15 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Orchestration failed: {e}")
             self.state_machine.fail(str(e))
+            
+            # Run code review even on failure to analyze what went wrong
+            if hasattr(self, 'code_reviewer') and self.code_reviewer.is_available():
+                try:
+                    logger.info("Running post-mortem code review...")
+                    self._code_review_result = await self._review_code(task_description)
+                except Exception as review_error:
+                    logger.warning(f"Code review failed: {review_error}")
+            
             self.events.emit(EventType.ERROR, {"message": str(e)})
             self._store_run_memory()
             self.events.emit(
@@ -1410,15 +1506,103 @@ class Orchestrator:
         file_path: Optional[str] = None,
         expected_behavior: str = "The project should satisfy the original request.",
     ) -> bool:
+        """Request repair with patching-first strategy.
+        
+        Strategy:
+        1. Try surgical patching first (fast, precise)
+        2. If patch fails, fallback to full rewrite (slower, but complete)
+        """
+        from pathlib import Path as PathLib
+        from .patch_applier import apply_patch
+        
         context = self.context.build_context([])
         error_type = classify_error(error_message, phase=phase)
         agent_name = choose_repair_agent(file_path, error_type)
         agent = self._get_agent(agent_name)
+        
         if not agent.is_available():
             logger.warning("Repair agent %s is unavailable", agent_name)
             return False
 
         relative_path = file_path or self._default_repair_path(agent_name)
+        filepath = PathLib(self.project_dir) / relative_path
+        
+        # Read file content for patching
+        if not filepath.exists():
+            logger.warning(f"File to repair not found: {filepath}")
+            return False
+        
+        file_content = filepath.read_text(encoding='utf-8')
+        
+        # STRATEGY 1: Try surgical patching first
+        if should_use_patching(error_type, len(file_content.splitlines())):
+            logger.info(f"Trying surgical patching for {relative_path}...")
+            
+            # Extract target code section
+            code_context, line_start, line_end = extract_patch_target(
+                error_message, file_content
+            )
+            
+            # Build patch prompt
+            patch_prompt = build_patch_prompt(
+                file_path=relative_path,
+                code_context=code_context,
+                line_start=line_start,
+                line_end=line_end,
+                error_message=error_message,
+            )
+            
+            # Use patcher agent if available, otherwise use regular agent
+            patcher_agent = self._get_agent("patcher") if "patcher" in AGENT_REGISTRY else agent
+            
+            if patcher_agent.is_available():
+                patch_result = await patcher_agent.execute(patch_prompt)
+                
+                if patch_result.status == "success" and patch_result.parsed_output:
+                    # Apply the patch
+                    new_code = patch_result.parsed_output
+                    patch_applied = apply_patch(
+                        filepath,
+                        {
+                            "line_start": line_start,
+                            "line_end": line_end,
+                            "new_code": new_code,
+                        }
+                    )
+                    
+                    if patch_applied["success"]:
+                        # Show diff to user via events
+                        self.events.emit(
+                            EventType.INFO,
+                            {
+                                "message": f"[PATCH APPLIED] {relative_path}\n{patch_applied['diff']}"
+                            }
+                        )
+                        logger.info(
+                            f"Patch successful: {patch_applied['old_lines']} lines → "
+                            f"{patch_applied['new_lines']} lines"
+                        )
+                        
+                        # Record the repair
+                        self._repair_history.append({
+                            "phase": phase,
+                            "error_type": error_type,
+                            "agent": "patcher",
+                            "file_path": relative_path,
+                            "error": error_message,
+                            "patch_type": "surgical",
+                            "lines_changed": patch_applied["lines_changed"],
+                            "diff": patch_applied["diff"],
+                        })
+                        return True
+                    else:
+                        logger.warning(f"Patch failed to apply: {patch_applied.get('error')}")
+                else:
+                    logger.warning(f"Patcher returned: {patch_result.status}")
+        
+        # STRATEGY 2: Fallback to full rewrite
+        logger.info(f"Patching failed, falling back to full rewrite for {relative_path}")
+        
         prompt = build_repair_prompt(
             project_dir=self.project_dir,
             error_message=error_message,
@@ -1454,6 +1638,7 @@ class Orchestrator:
             "error": error_message,
             "files_applied": patch_result.get("files_created", []),
             "summary": result.parsed_output.get("summary", ""),
+            "patch_type": "full_rewrite",
         }
         self._repair_history.append(repair_record)
         self._write_session_artifact("repair", repair_record, append=True)
@@ -1569,6 +1754,7 @@ class Orchestrator:
             "validation_result": getattr(self, "_validation_result", {}),
             "runtime_result": getattr(self, "_runtime_result", {}),
             "evaluation_result": getattr(self, "_evaluation_result", {}),
+            "code_review_result": getattr(self, "_code_review_result", {}),
             "meta_decisions": getattr(self, "_meta_decisions", []),
             "meta_summary": meta_summary,
             "confidence": confidence,
@@ -1677,6 +1863,80 @@ class Orchestrator:
             "architectural_issues": _dedupe_strings(architectural_issues),
             "suggestions": _dedupe_strings(suggestions),
         }
+
+    async def _review_code(self, original_request: str) -> Optional[dict]:
+        """Perform comprehensive code review for bugs, security issues, and quality."""
+        self.events.emit(
+            EventType.INFO,
+            {"message": "[Code Review] Analyzing generated code for bugs and quality issues..."},
+        )
+
+        if not self.code_reviewer.is_available():
+            logger.warning("Code reviewer not available, skipping review")
+            return None
+
+        # Collect all generated files
+        files_to_review = []
+        for task_id, task in self.task_manager.tasks.items():
+            if task.result:
+                for file_info in task.result.get("files", []):
+                    if file_info.get("path") and file_info.get("content"):
+                        files_to_review.append(file_info)
+
+        if not files_to_review:
+            logger.warning("No files to review")
+            return None
+
+        # Build prompt and execute review
+        prompt = self.code_reviewer.build_prompt(
+            project_name=f"Session {self.session_id}",
+            original_request=original_request,
+            files=files_to_review,
+        )
+
+        result = await self.code_reviewer.execute(prompt)
+
+        if result.status == "success" and result.parsed_output:
+            review = result.parsed_output
+            self._write_session_artifact("code_review", review)
+            self._persist_session_results()
+
+            # Display review summary
+            score = review.get("quality_score", 0)
+            issues = review.get("issues", [])
+            critical = sum(1 for i in issues if i.get("severity") == "critical")
+            high = sum(1 for i in issues if i.get("severity") == "high")
+
+            self.events.emit(
+                EventType.INFO,
+                {
+                    "message": f"[Code Review] Quality Score: {score}/100",
+                },
+            )
+
+            if critical or high:
+                self.events.emit(
+                    EventType.WARNING,
+                    {
+                        "message": f"[Code Review] Found {critical} critical and {high} high severity issues",
+                    },
+                )
+
+            # Display top issues
+            for issue in issues[:5]:  # Show top 5 issues
+                severity = issue.get("severity", "unknown")
+                title = issue.get("title", "Unknown issue")
+                file_path = issue.get("file", "unknown")
+                self.events.emit(
+                    EventType.INFO,
+                    {
+                        "message": f"  [{severity.upper()}] {title} in {file_path}",
+                    },
+                )
+
+            return review
+
+        return None
 
     def _collect_issues_remaining(self) -> list[str]:
         issues = []

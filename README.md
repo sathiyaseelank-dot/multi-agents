@@ -14,6 +14,23 @@ The Multi-Agent Orchestrator is a sophisticated task orchestration system that c
 - **Agent fallback mechanism** — Automatic failover to alternate agents on failure
 - **Structured output generation** — Code blocks extracted and written to files automatically
 
+## Quick Start
+
+```bash
+# Install the enhanced CLI (recommended)
+./install-cli.sh
+source ~/.bashrc
+
+# Run your first task
+multi run "Build a REST API with user authentication"
+
+# Check session status
+multi list
+multi status 20260329-101850
+```
+
+See [CLI.md](CLI.md) for full CLI documentation.
+
 ## Architecture
 
 ```
@@ -75,7 +92,39 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Basic Usage
+### Enhanced CLI (Recommended)
+
+```bash
+# Install the CLI
+./install-cli.sh
+source ~/.bashrc
+
+# Run a task
+multi run "Build a REST API with user authentication"
+
+# Quick presets
+multi quick plan "Build a login system"    # Plan only
+multi quick test "Build a todo app"        # Dry run + verbose
+multi quick heal "Build X"                 # With self-healing
+
+# Session management
+multi list                     # List sessions
+multi status 20260329-101850   # Session details
+multi resume                   # Resume interactively
+multi resume 20260329-101850   # Resume specific session
+
+# Search & cleanup
+multi search "authentication" --memory   # Search sessions
+multi clean --days 30                    # Clean old files
+
+# Info
+multi agents    # Check agent availability
+multi info      # Project statistics
+```
+
+See [CLI.md](CLI.md) for full CLI documentation.
+
+### Direct Python Usage
 
 ```bash
 # Run with a task description

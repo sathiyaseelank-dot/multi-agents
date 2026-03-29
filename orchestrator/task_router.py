@@ -9,9 +9,10 @@ logger = logging.getLogger(__name__)
 
 # Fallback agents when the primary fails
 FALLBACK_MAP = {
-    "opencode": ["kilo", "gemini"],
-    "gemini": ["opencode", "kilo"],
-    "kilo": ["opencode", "gemini"],
+    "opencode": ["qwen", "kilo", "gemini"],
+    "gemini": ["qwen", "opencode", "kilo"],
+    "kilo": ["qwen", "opencode", "gemini"],
+    "qwen": ["opencode", "gemini", "kilo"],
 }
 
 # Agent capabilities — what each can reasonably handle
@@ -19,6 +20,7 @@ AGENT_CAPABILITIES = {
     "opencode": {"backend", "testing", "frontend"},
     "gemini": {"frontend", "backend", "testing"},
     "kilo": {"testing", "backend", "frontend"},
+    "qwen": {"backend", "frontend", "testing"},
 }
 
 

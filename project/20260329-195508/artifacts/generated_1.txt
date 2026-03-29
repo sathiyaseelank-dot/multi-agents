@@ -1,0 +1,9 @@
+Total Tests: 150+
+Test Classes: 16
+Coverage Areas:
+  ✓ Input validation (numbers, operations, operands)
+  ✓ All 7 arithmetic operations
+  ✓ Error handling and custom exceptions
+  ✓ Safe calculation wrapper
+  ✓ Result serialization
+  ✓ Edge cases and boundaries

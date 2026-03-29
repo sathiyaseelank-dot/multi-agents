@@ -1,4 +1,7 @@
-"""Repair analysis and prompt construction."""
+"""Repair analysis and prompt construction.
+
+Extended with patching support for surgical code fixes.
+"""
 
 from __future__ import annotations
 
@@ -26,6 +29,23 @@ def choose_repair_agent(file_path: str | None, error_type: str) -> str:
     if path.startswith("tests/"):
         return "kilo"
     return "opencode"
+
+
+def should_use_patching(error_type: str, file_size_lines: int) -> bool:
+    """Determine if patching should be tried before full rewrite.
+    
+    Per user preference: Always try patching first.
+    
+    Args:
+        error_type: Type of error (syntax, runtime, import, dependency)
+        file_size_lines: Number of lines in the file
+    
+    Returns:
+        True if patching should be attempted first
+    """
+    # Always try patching first (user preference)
+    # Patching is faster, cheaper, and safer for most errors
+    return True
 
 
 def collect_relevant_files(
@@ -97,3 +117,64 @@ def build_repair_prompt(
         '  "errors": []\n'
         "}\n"
     )
+
+
+def build_patch_prompt(
+    file_path: str,
+    code_context: str,
+    line_start: int,
+    line_end: int,
+    error_message: str,
+    language: str = "python"
+) -> str:
+    """Build prompt for surgical patching.
+    
+    Args:
+        file_path: Path to the file being patched
+        code_context: The code lines that need fixing
+        line_start: Starting line number (0-indexed)
+        line_end: Ending line number (exclusive)
+        error_message: Description of the error
+        language: Programming language
+    
+    Returns:
+        Prompt string for the patcher agent
+    """
+    return (
+        f"You are a surgical code repair specialist. Fix ONLY the specific issue.\n\n"
+        f"**File:** {file_path}\n"
+        f"**Lines:** {line_start}-{line_end}\n"
+        f"**Error:** {error_message}\n\n"
+        f"**Current code (lines {line_start}-{line_end}):**\n"
+        f"```{language}\n{code_context}\n```\n\n"
+        f"**Your task:**\n"
+        f"Return ONLY the corrected code block for lines {line_start}-{line_end}.\n"
+        f"- Do NOT rewrite the entire file\n"
+        f"- Do NOT add explanations\n"
+        f"- Do NOT include markdown fences\n"
+        f"- Preserve indentation from the original code\n"
+        f"- Fix ONLY the specific error mentioned\n\n"
+        f"**Corrected code:**\n"
+    )
+
+
+def extract_patch_target(error_message: str, file_content: str) -> tuple[str, int, int]:
+    """Extract the target code section that needs patching.
+    
+    Args:
+        error_message: Error message from validation/runtime
+        file_content: Full file content
+    
+    Returns:
+        Tuple of (code_context, line_start, line_end)
+    """
+    # Import line_finder to get smart line detection
+    from .line_finder import find_lines_to_fix
+    
+    lines = file_content.splitlines()
+    line_start, line_end = find_lines_to_fix(file_content, error_message)
+    
+    # Extract the code context
+    code_context = '\n'.join(lines[line_start:line_end])
+    
+    return code_context, line_start, line_end

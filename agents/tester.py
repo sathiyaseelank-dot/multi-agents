@@ -31,7 +31,7 @@ class TesterAgent(BaseAgent):
                 command="kilo",
                 subcommand="run",
                 args=args,
-                timeout_seconds=180,
+                timeout_seconds=600,  # 10 minutes for complex test generation
                 retry_count=2,
                 retry_backoff_seconds=5,
             )
