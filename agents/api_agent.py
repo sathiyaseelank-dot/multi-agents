@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any, Optional
 
 import aiohttp
@@ -261,6 +262,18 @@ class APIAgent(BaseAgent):
     def is_available(self) -> bool:
         """Check if API agent is available."""
         return bool(self.api_key) and bool(self.model)
+
+
+def load_api_keys() -> dict:
+    """Load API keys from config file."""
+    project_root = Path(__file__).resolve().parent.parent
+    keys_file = project_root / "config" / "api_keys.json"
+    if keys_file.exists():
+        try:
+            return json.loads(keys_file.read_text())
+        except json.JSONDecodeError:
+            return {}
+    return {}
 
 
 def create_api_agent(

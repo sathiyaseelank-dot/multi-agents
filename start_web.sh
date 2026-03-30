@@ -17,7 +17,7 @@ fi
 # Check if Flask API dependencies are installed
 if ! python3 -c "import flask_cors" 2>/dev/null; then
     echo "Installing Flask API dependencies..."
-    pip install -q flask flask-cors
+    pip install -q -r flask_api/requirements.txt
 fi
 
 # Check if Node.js is available for frontend

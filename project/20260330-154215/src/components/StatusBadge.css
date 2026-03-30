@@ -1,0 +1,38 @@
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.status-icon {
+  font-size: 14px;
+}
+
+.status-pending {
+  background: #dbedff;
+  color: #0366d6;
+}
+
+.status-planning {
+  background: #fffbdd;
+  color: #735c0f;
+}
+
+.status-running {
+  background: #f1f8ff;
+  color: #0366d6;
+}
+
+.status-completed {
+  background: #dcffe4;
+  color: #22863a;
+}
+
+.status-failed {
+  background: #ffeef0;
+  color: #cb2431;
+}

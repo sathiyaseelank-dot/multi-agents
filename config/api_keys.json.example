@@ -1,0 +1,11 @@
+{
+  "agents": {
+    "openrouter_backend": {
+      "provider": "openrouter",
+      "api_key": "sk-or-v1-YOUR-KEY-HERE",
+      "model": "aion-labs/aion-1.0-mini",
+      "role": "backend",
+      "enabled": true
+    }
+  }
+}

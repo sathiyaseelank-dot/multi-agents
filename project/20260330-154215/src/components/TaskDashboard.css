@@ -1,0 +1,163 @@
+.task-dashboard {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 20px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 30px;
+  padding-bottom: 20px;
+  border-bottom: 2px solid #e1e4e8;
+}
+
+.dashboard-header h1 {
+  margin: 0;
+  color: #24292e;
+  font-size: 28px;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 15px;
+  margin-bottom: 30px;
+}
+
+.stat-card {
+  background: #f6f8fa;
+  border: 1px solid #e1e4e8;
+  border-radius: 8px;
+  padding: 20px;
+  text-align: center;
+  transition: transform 0.2s;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+}
+
+.stat-value {
+  display: block;
+  font-size: 32px;
+  font-weight: bold;
+  color: #24292e;
+}
+
+.stat-label {
+  display: block;
+  font-size: 14px;
+  color: #586069;
+  margin-top: 5px;
+}
+
+.stat-card.pending .stat-value { color: #dbedff; }
+.stat-card.running .stat-value { color: #ffeb3b; }
+.stat-card.completed .stat-value { color: #28a745; }
+.stat-card.failed .stat-value { color: #d73a49; }
+
+.filter-bar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding: 15px;
+  background: #f6f8fa;
+  border-radius: 8px;
+  align-items: center;
+}
+
+.filter-bar span {
+  font-weight: 600;
+  color: #24292e;
+}
+
+.filter-bar button {
+  padding: 8px 16px;
+  border: 1px solid #e1e4e8;
+  background: white;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.filter-bar button:hover {
+  background: #f6f8fa;
+}
+
+.filter-bar button.active {
+  background: #0366d6;
+  color: white;
+  border-color: #0366d6;
+}
+
+.tasks-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+  gap: 20px;
+}
+
+.empty-state {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 60px 20px;
+  background: #f6f8fa;
+  border-radius: 8px;
+}
+
+.empty-state p {
+  color: #586069;
+  margin-bottom: 20px;
+}
+
+.btn-primary {
+  background: #0366d6;
+  color: white;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: background 0.2s;
+}
+
+.btn-primary:hover {
+  background: #0256b9;
+}
+
+.btn-primary:disabled {
+  background: #94c4f7;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: white;
+  color: #24292e;
+  border: 1px solid #e1e4e8;
+  padding: 10px 20px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: background 0.2s;
+}
+
+.btn-secondary:hover {
+  background: #f6f8fa;
+}
+
+@media (max-width: 768px) {
+  .dashboard-header {
+    flex-direction: column;
+    gap: 15px;
+  }
+  
+  .tasks-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .filter-bar {
+    flex-wrap: wrap;
+  }
+}

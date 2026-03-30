@@ -81,6 +81,9 @@ Thumbs.db
 flask_api/*.db
 flask_api/instance/
 
+# API keys (should never be committed)
+config/api_keys.json
+
 # Agent CLI credentials (should never be committed)
 ~/.codex/
 ~/.gemini/

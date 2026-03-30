@@ -1,4 +1,5 @@
 import secrets
+import sqlite3
 import bcrypt
 from datetime import datetime, timedelta
 from flask import current_app
@@ -62,7 +63,7 @@ class User:
                 (username, email, password_hash),
             )
             db.commit()
-        except db.IntegrityError:
+        except sqlite3.IntegrityError:
             return None, {
                 "field": "general",
                 "errors": ["Username or email already exists"],
